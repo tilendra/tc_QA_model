@@ -1,0 +1,32 @@
+name: tc-qa_model
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - tk                  # tkinter GUI
+  - pip
+  # System-level libraries useful for audio / OCR / PDF rendering
+  - tesseract           # required by pytesseract (OCR engine)
+  - poppler             # PDF rendering utilities (optional; improves some PDF workflows)
+  - portaudio           # low-level audio backend (used by pyaudio)
+  - libsndfile          # used by sounddevice
+  - cairo               # for some PDF/image rendering (optional)
+  - pkg-config          # for building some wheels
+  - ffmpeg              # for audio/video (optional)
+  # Python packages installed via pip
+  - pip:
+    - openai>=1.0.0                      # OpenAI python client (used in code)
+    - PyPDF2>=3.0.0                       # PDF text extraction
+    - python-docx>=0.8.11                 # read .docx files (module name 'docx')
+    - pandas>=1.5.0                       # CSV/Excel handling
+    - Pillow>=9.0.0                       # image handling (PIL)
+    - pytesseract>=0.3.10                 # OCR wrapper for Tesseract
+    - SpeechRecognition>=3.8.1            # voice recognition wrapper
+    - pyttsx3>=2.90                       # text-to-speech
+    - sounddevice>=0.4.6                  # alternative audio backend for recording/playback
+    - pyaudio>=0.2.13                     # microphone audio (may require portaudio)
+    - python-magic>=0.4.27                # optional: file type detection
+    - setuptools>=65.0.0
+    - wheel
+    - tkinterdnd2                         # drag-and-drop for tkinter

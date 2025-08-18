@@ -1,0 +1,943 @@
+Q: Please make a python code to interpret the sepsis physiophenotypes (phenotypes derived and stratified by physiomarkers of ECG, PPG and RESP waveforms and their summary statistics- mean, percentile25, percentile75, skewness, entropy from the data of 5min just prior to sepsis-3 onset) by analyzing cluster_labels and data (shown in context). Make a interpretation report and Name the phenotypes.
+A:
+1. Explanation:
+
+This code analyzes cluster labels produced by your consensus clustering and the associated physiomarker features (ECG, PPG, RESP and their summary statistics) and produces an interpretation report for each phenotype cluster. It computes per-cluster summaries (means, z-scores relative to global distribution, top distinguishing features), groups features by modality and statistic, creates short interpretable phenotype names using simple heuristics (e.g., "High ECG irregularity & elevated PPG amplitude"), saves textual and table reports and generates diagnostic plots (heatmap of normalized cluster means and boxplots of top features). It also returns a programmatic dictionary of cluster interpretations for downstream use.
+
+2. Modified Code:
+
+```python
+import os
+import json
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import skew
+from collections import defaultdict
+
+def interpret_sepsis_phenotypes(df_data, feature_columns, cluster_labels,
+                                out_dir='cluster_interpretation',
+                                top_n_features=6, z_thresh=0.5,
+                                modalities=None, stats_keywords=None,
+                                random_state=42):
+    """
+    Produce interpretation report & figures for clustering results on physiomarker features.
+
+    Inputs:
+      - df_data: pandas DataFrame containing features and (optionally) other columns
+      - feature_columns: list of column names in df_data to use for interpretation
+      - cluster_labels: array-like of integer cluster labels for each row in df_data
+      - out_dir: folder to save reports and figures
+      - top_n_features: number of top positive/negative distinguishing features to list per cluster
+      - z_thresh: z-score threshold for considering a modality/statistic elevated/reduced
+      - modalities: iterable of strings to detect modalities in feature names; defaults to ['ecg','ppg','resp']
+      - stats_keywords: keywords representing summary stats to search inside feature names
+    Returns:
+      - interpretations: dict keyed by cluster id containing interpretation info
+    """
+    np.random.seed(random_state)
+    if modalities is None:
+        modalities = ['ecg', 'ppg', 'resp']
+    if stats_keywords is None:
+        # common suffixes / keywords used in your features (adjust if needed)
+        stats_keywords = ['mean', 'p25', 'p75', 'skew', 'entropy', 'median', 'std', 'var']
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Subset features
+    missing = [c for c in feature_columns if c not in df_data.columns]
+    if missing:
+        raise ValueError(f"Feature columns missing from dataframe: {missing}")
+    X = df_data[feature_columns].copy().reset_index(drop=True)
+    labels = np.asarray(cluster_labels).reshape(-1)
+    if len(labels) != X.shape[0]:
+        raise ValueError("cluster_labels length mismatch with number of rows in df_data[feature_columns].")
+
+    clusters = np.unique(labels)
+    n_clusters = len(clusters)
+    n_samples = X.shape[0]
+
+    # Global stats
+    global_mean = X.mean(axis=0)
+    global_std = X.std(axis=0).replace(0, 1e-8)  # avoid division by zero
+
+    # Per-cluster summaries
+    cluster_feature_means = pd.DataFrame(index=feature_columns, columns=clusters, dtype=float)
+    cluster_counts = {}
+    cluster_feature_skew = pd.DataFrame(index=feature_columns, columns=clusters, dtype=float)
+
+    for c in clusters:
+        idx = np.where(labels == c)[0]
+        cluster_counts[int(c)] = len(idx)
+        Xc = X.iloc[idx]
+        cluster_feature_means[c] = Xc.mean(axis=0)
+        # fallback skew using scipy.stats.skew (handle constant columns)
+        try:
+            cluster_feature_skew[c] = Xc.apply(lambda col: float(skew(col.dropna())) if col.dropna().size > 2 else 0.0)
+        except Exception:
+            cluster_feature_skew[c] = 0.0
+
+    # Z-scores of cluster means relative to global distribution
+    cluster_feature_z = (cluster_feature_means.subtract(global_mean, axis=0)).divide(global_std, axis=0)
+
+    # Map features to modalities and stats by substring matching
+    feat_to_mod = {}
+    feat_to_stat = {}
+    for feat in feature_columns:
+        ln = feat.lower()
+        matched_mods = [m.upper() for m in modalities if m in ln]
+        feat_to_mod[feat] = matched_mods[0] if matched_mods else 'OTHER'
+        matched_stats = [k for k in stats_keywords if k in ln]
+        feat_to_stat[feat] = matched_stats[0] if matched_stats else 'other'
+
+    # Compute modality-stat aggregated z-scores per cluster
+    modality_stat_z = {c: defaultdict(list) for c in clusters}
+    for c in clusters:
+        for feat in feature_columns:
+            mod = feat_to_mod[feat]
+            stat = feat_to_stat[feat]
+            modality_stat_z[c][(mod, stat)].append(cluster_feature_z.loc[feat, c])
+
+    modality_stat_meanz = {}
+    for c in clusters:
+        modality_stat_meanz[c] = {k: float(np.mean(v)) if len(v) > 0 else 0.0 for k, v in modality_stat_z[c].items()}
+
+    # Heuristic phrase building maps
+    stat_phrase_map = {
+        'mean': ('elevated mean amplitude', 'reduced mean amplitude'),
+        'p75': ('higher upper-percentiles', 'lower upper-percentiles'),
+        'p25': ('higher lower-percentiles', 'lower lower-percentiles'),
+        'skew': ('asymmetric waveform distribution', 'opposite asymmetry'),
+        'entropy': ('high signal irregularity', 'low signal irregularity'),
+        'median': ('elevated median', 'reduced median'),
+        'std': ('high variability', 'low variability'),
+        'var': ('high variability', 'low variability'),
+        'other': ('distinctive pattern', 'reduced distinctive pattern')
+    }
+
+    interpretations = {}
+
+    # Find per-cluster representative indices (closest to cluster mean)
+    cluster_centroids = cluster_feature_means.transpose().values  # clusters x features
+    rep_indices = {}
+    for i, c in enumerate(clusters):
+        idx = np.where(labels == c)[0]
+        if len(idx) == 0:
+            rep_indices[int(c)] = []
+            continue
+        # compute euclidean distance to centroid in original feature space (means)
+        # normalize by feature std for fairness
+        centroid = cluster_feature_means[c].values
+        Xc = X.iloc[idx].values
+        dists = np.linalg.norm((Xc - centroid) / (global_std.values + 1e-8), axis=1)
+        rep_local = np.argsort(dists)[:min(5, len(dists))]
+        rep_indices[int(c)] = list(idx[rep_local])
+
+    # Top discriminating features per cluster
+    for c in clusters:
+        z_series = cluster_feature_z[c].sort_values(ascending=False)
+        top_pos = z_series.head(top_n_features)
+        top_neg = z_series.tail(top_n_features)
+        # Build modality-stat importance ordering
+        ms_map = modality_stat_meanz[c]
+        # Sort modality-stat by descending mean z
+        ms_sorted = sorted(ms_map.items(), key=lambda kv: kv[1], reverse=True)
+
+        # Compose phenotype name heuristically: pick top 2 (mod,stat) with mean z>z_thresh
+        name_parts = []
+        for (mod, stat), mz in ms_sorted[:4]:
+            if abs(mz) >= z_thresh:
+                if mz > 0:
+                    phrase = stat_phrase_map.get(stat, stat_phrase_map['other'])[0]
+                    name_parts.append(f"{mod}: {phrase}")
+                else:
+                    phrase = stat_phrase_map.get(stat, stat_phrase_map['other'])[1]
+                    name_parts.append(f"{mod}: {phrase}")
+            if len(name_parts) >= 2:
+                break
+        if len(name_parts) == 0:
+            # fallback: choose most extreme feature-driven description
+            fp = top_pos.index.tolist()[:2] + top_neg.index.tolist()[:1]
+            name_parts = [f"{feat} {'↑' if cluster_feature_z.loc[feat,c]>0 else '↓'}" for feat in fp]
+
+        phenotype_name = " & ".join(name_parts)
+        # shorten overly long names
+        if len(phenotype_name) > 100:
+            phenotype_name = phenotype_name[:97] + "..."
+
+        # Build textual summary
+        summary_lines = []
+        summary_lines.append(f"Cluster {int(c)} (n={cluster_counts[int(c)]}; {100*cluster_counts[int(c)]/n_samples:.1f}%):")
+        summary_lines.append(f"  Phenotype name: {phenotype_name}")
+        summary_lines.append("  Top positive distinguishing features (z > 0):")
+        for feat, z in top_pos.items():
+            summary_lines.append(f"    {feat}: z={z:.2f} (mod={feat_to_mod[feat]}, stat={feat_to_stat[feat]})")
+        summary_lines.append("  Top negative distinguishing features (z < 0):")
+        for feat, z in top_neg[::-1].items():  # show most negative first
+            summary_lines.append(f"    {feat}: z={z:.2f} (mod={feat_to_mod[feat]}, stat={feat_to_stat[feat]})")
+        # modality-stat table
+        summary_lines.append("  Modality-stat mean z-scores (examples):")
+        # show top modality-stat entries
+        shown = 0
+        for (mod, stat), mz in ms_sorted:
+            summary_lines.append(f"    {mod}-{stat}: mean_z={mz:.2f}")
+            shown += 1
+            if shown >= 8:
+                break
+        summary_lines.append(f"  Representative sample indices (closest to centroid): {rep_indices[int(c)]}")
+
+        interpretations[int(c)] = {
+            'cluster': int(c),
+            'count': int(cluster_counts[int(c)]),
+            'percent': float(100*cluster_counts[int(c)]/n_samples),
+            'phenotype_name': phenotype_name,
+            'top_positive_features': top_pos.to_dict(),
+            'top_negative_features': top_neg.to_dict(),
+            'modality_stat_meanz': modality_stat_meanz[c],
+            'representative_indices': rep_indices[int(c)],
+            'text_summary': "\n".join(summary_lines)
+        }
+
+    # Save full tables
+    cluster_feature_means.to_csv(os.path.join(out_dir, 'cluster_feature_means.csv'))
+    cluster_feature_z.to_csv(os.path.join(out_dir, 'cluster_feature_z.csv'))
+
+    # Save JSON of interpretations
+    with open(os.path.join(out_dir, 'cluster_interpretations.json'), 'w') as f:
+        json.dump(interpretations, f, indent=2)
+
+    # Save plain text report
+    with open(os.path.join(out_dir, 'cluster_report.txt'), 'w') as ftxt:
+        title = f"Cluster Interpretation Report ({n_clusters} clusters, {n_samples} samples)\n\n"
+        ftxt.write(title)
+        for c in sorted(interpretations.keys()):
+            ftxt.write(interpretations[c]['text_summary'] + "\n\n")
+
+    # Plots: Heatmap of cluster-feature z-scores (trimmed for readability)
+    plt.figure(figsize=(max(8, 0.15*len(feature_columns)), max(4, n_clusters*1.2)))
+    sns.heatmap(cluster_feature_z.transpose(), cmap='vlag', center=0.0, cbar_kws={'label': 'z-score'},
+                xticklabels=True, yticklabels=[f'Cluster {int(c)}' for c in clusters])
+    plt.title('Cluster means (z-score normalized per feature)')
+    plt.xlabel('Features')
+    plt.ylabel('Clusters')
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, 'cluster_feature_z_heatmap.png'), dpi=200)
+    plt.close()
+
+    # Plot per-cluster bar of modality-stat mean z for top modalities
+    for c in clusters:
+        ms = modality_stat_meanz[c]
+        if not ms:
+            continue
+        keys, vals = zip(*sorted(ms.items(), key=lambda kv: kv[1], reverse=True))
+        labels_plot = [f"{k[0]}-{k[1]}" for k in keys[:12]]
+        vals_plot = [float(v) for v in vals[:12]]
+        plt.figure(figsize=(10, 4))
+        sns.barplot(x=vals_plot, y=labels_plot, palette='coolwarm')
+        plt.axvline(0, color='k', linewidth=0.5)
+        plt.title(f'Cluster {int(c)}: modality-stat mean z (top)')
+        plt.xlabel('mean z-score')
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, f'cluster_{int(c)}_modstat_bar.png'), dpi=200)
+        plt.close()
+
+    # Boxplots for top global distinguishing features (union of top features across clusters)
+    union_features = set()
+    for c in clusters:
+        union_features.update(list(interpretations[int(c)]['top_positive_features'].keys()))
+        union_features.update(list(interpretations[int(c)]['top_negative_features'].keys()))
+    union_features = [f for f in feature_columns if f in union_features]
+    if union_features:
+        n_col = min(6, len(union_features))
+        plt.figure(figsize=(max(8, 2*n_col), 4*int(np.ceil(len(union_features)/n_col))))
+        for i, feat in enumerate(union_features):
+            plt.subplot(int(np.ceil(len(union_features)/n_col)), n_col, i+1)
+            sns.boxplot(x=labels, y=X[feat], palette='Set2')
+            plt.title(feat)
+            plt.xlabel('Cluster')
+            plt.tight_layout()
+        plt.suptitle('Distribution of Top Distinguishing Features by Cluster', y=1.02)
+        plt.savefig(os.path.join(out_dir, 'top_features_boxplots.png'), dpi=200, bbox_inches='tight')
+        plt.close()
+
+    # Print summary to console
+    print(f"Saved interpretation files to '{out_dir}'.")
+    for c in sorted(interpretations.keys()):
+        print(interpretations[c]['text_summary'].splitlines()[0])  # single-line summary
+
+    return interpretations
+
+# Example usage:
+# interpretations = interpret_sepsis_phenotypes(df_data=df_data, feature_columns=feature_list, cluster_labels=cluster_labels)
+# The function returns a dictionary with interpretations and saves files/figures to 'cluster_interpretation' folder.
+```
+
+---
+
+Q: Please use popular openai and claude models including gpt-5-mini and gpt-5 also into this by careful inserting parameters related to max tokens and temperature (1 for gpt-5/mini, 0.2 or 0.3 otherwise).
+A:
+1. Explanation:
+- The original function computes per-cluster summaries of physiomarker features (means, z-scores, representative samples), creates heuristic phenotype names, saves CSV/JSON/text reports, and draws diagnostic plots.
+- The modified code does the same but adds optional integration with LLMs (OpenAI and Anthropic/Claude). It can send compact cluster summaries to a chosen LLM to: (a) refine short phenotype names, (b) produce single-sentence clinical descriptions, and (c) list key distinguishing features and suggested clinical implications.
+- The LLM wrapper selects temperature and max_tokens automatically based on the chosen model (e.g., higher creativity for gpt-5 / gpt-5-mini by setting temperature=1; lower temperature like 0.2–0.3 for other models), and uses sensible default max_tokens per model. API keys are read from environment variables. Outputs from the LLM are saved alongside the regular interpretations.
+
+2. Modified Code:
+```python
+import os
+import json
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import skew
+from collections import defaultdict
+import textwrap
+import time
+
+# Optional imports for LLM APIs. These will be imported only when needed to avoid hard dependency.
+try:
+    import openai
+except Exception:
+    openai = None
+
+try:
+    from anthropic import Anthropic  # pip install anthropic
+except Exception:
+    Anthropic = None
+
+def interpret_sepsis_phenotypes(df_data, feature_columns, cluster_labels,
+                                out_dir='cluster_interpretation',
+                                top_n_features=6, z_thresh=0.5,
+                                modalities=None, stats_keywords=None,
+                                random_state=42,
+                                call_llm=False,
+                                llm_provider='openai',
+                                llm_model=None,
+                                llm_max_tokens=None,
+                                llm_temperature=None,
+                                llm_system_prompt=None,
+                                llm_save_response=True):
+    """
+    Produce interpretation report & figures for clustering results on physiomarker features.
+    Optionally refine phenotype names & descriptions using an LLM (OpenAI or Anthropic/Claude).
+
+    New LLM-related args:
+      - call_llm: bool, whether to call an LLM to refine phenotype names/descriptions.
+      - llm_provider: 'openai' or 'anthropic'
+      - llm_model: model name string (e.g., 'gpt-5-mini', 'gpt-5', 'gpt-4o', 'claude-2.1')
+      - llm_max_tokens: optional override for LLM max tokens
+      - llm_temperature: optional override for temperature
+      - llm_system_prompt: optional custom system prompt for the LLM
+      - llm_save_response: save LLM raw response to file if True
+    """
+    np.random.seed(random_state)
+    if modalities is None:
+        modalities = ['ecg', 'ppg', 'resp']
+    if stats_keywords is None:
+        stats_keywords = ['mean', 'p25', 'p75', 'skew', 'entropy', 'median', 'std', 'var']
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Subset features
+    missing = [c for c in feature_columns if c not in df_data.columns]
+    if missing:
+        raise ValueError(f"Feature columns missing from dataframe: {missing}")
+    X = df_data[feature_columns].copy().reset_index(drop=True)
+    labels = np.asarray(cluster_labels).reshape(-1)
+    if len(labels) != X.shape[0]:
+        raise ValueError("cluster_labels length mismatch with number of rows in df_data[feature_columns].")
+
+    clusters = np.unique(labels)
+    n_clusters = len(clusters)
+    n_samples = X.shape[0]
+
+    # Global stats
+    global_mean = X.mean(axis=0)
+    global_std = X.std(axis=0).replace(0, 1e-8)  # avoid division by zero
+
+    # Per-cluster summaries
+    cluster_feature_means = pd.DataFrame(index=feature_columns, columns=clusters, dtype=float)
+    cluster_counts = {}
+    cluster_feature_skew = pd.DataFrame(index=feature_columns, columns=clusters, dtype=float)
+
+    for c in clusters:
+        idx = np.where(labels == c)[0]
+        cluster_counts[int(c)] = len(idx)
+        Xc = X.iloc[idx]
+        cluster_feature_means[c] = Xc.mean(axis=0)
+        try:
+            cluster_feature_skew[c] = Xc.apply(lambda col: float(skew(col.dropna())) if col.dropna().size > 2 else 0.0)
+        except Exception:
+            cluster_feature_skew[c] = 0.0
+
+    # Z-scores of cluster means relative to global distribution
+    cluster_feature_z = (cluster_feature_means.subtract(global_mean, axis=0)).divide(global_std, axis=0)
+
+    # Map features to modalities and stats by substring matching
+    feat_to_mod = {}
+    feat_to_stat = {}
+    for feat in feature_columns:
+        ln = feat.lower()
+        matched_mods = [m.upper() for m in modalities if m in ln]
+        feat_to_mod[feat] = matched_mods[0] if matched_mods else 'OTHER'
+        matched_stats = [k for k in stats_keywords if k in ln]
+        feat_to_stat[feat] = matched_stats[0] if matched_stats else 'other'
+
+    # Compute modality-stat aggregated z-scores per cluster
+    modality_stat_z = {c: defaultdict(list) for c in clusters}
+    for c in clusters:
+        for feat in feature_columns:
+            mod = feat_to_mod[feat]
+            stat = feat_to_stat[feat]
+            modality_stat_z[c][(mod, stat)].append(cluster_feature_z.loc[feat, c])
+
+    modality_stat_meanz = {}
+    for c in clusters:
+        modality_stat_meanz[c] = {k: float(np.mean(v)) if len(v) > 0 else 0.0 for k, v in modality_stat_z[c].items()}
+
+    # Heuristic phrase building maps
+    stat_phrase_map = {
+        'mean': ('elevated mean amplitude', 'reduced mean amplitude'),
+        'p75': ('higher upper-percentiles', 'lower upper-percentiles'),
+        'p25': ('higher lower-percentiles', 'lower lower-percentiles'),
+        'skew': ('asymmetric waveform distribution', 'opposite asymmetry'),
+        'entropy': ('high signal irregularity', 'low signal irregularity'),
+        'median': ('elevated median', 'reduced median'),
+        'std': ('high variability', 'low variability'),
+        'var': ('high variability', 'low variability'),
+        'other': ('distinctive pattern', 'reduced distinctive pattern')
+    }
+
+    interpretations = {}
+
+    # Find per-cluster representative indices (closest to cluster mean)
+    cluster_centroids = cluster_feature_means.transpose().values  # clusters x features
+    rep_indices = {}
+    for i, c in enumerate(clusters):
+        idx = np.where(labels == c)[0]
+        if len(idx) == 0:
+            rep_indices[int(c)] = []
+            continue
+        centroid = cluster_feature_means[c].values
+        Xc = X.iloc[idx].values
+        dists = np.linalg.norm((Xc - centroid) / (global_std.values + 1e-8), axis=1)
+        rep_local = np.argsort(dists)[:min(5, len(dists))]
+        rep_indices[int(c)] = list(idx[rep_local])
+
+    # Top discriminating features per cluster
+    for c in clusters:
+        z_series = cluster_feature_z[c].sort_values(ascending=False)
+        top_pos = z_series.head(top_n_features)
+        top_neg = z_series.tail(top_n_features)
+        ms_map = modality_stat_meanz[c]
+        ms_sorted = sorted(ms_map.items(), key=lambda kv: kv[1], reverse=True)
+
+        # Compose phenotype name heuristically: pick top 2 (mod,stat) with mean z>z_thresh
+        name_parts = []
+        for (mod, stat), mz in ms_sorted[:4]:
+            if abs(mz) >= z_thresh:
+                if mz > 0:
+                    phrase = stat_phrase_map.get(stat, stat_phrase_map['other'])[0]
+                    name_parts.append(f"{mod}: {phrase}")
+                else:
+                    phrase = stat_phrase_map.get(stat, stat_phrase_map['other'])[1]
+                    name_parts.append(f"{mod}: {phrase}")
+            if len(name_parts) >= 2:
+                break
+        if len(name_parts) == 0:
+            fp = top_pos.index.tolist()[:2] + top_neg.index.tolist()[:1]
+            name_parts = [f"{feat} {'↑' if cluster_feature_z.loc[feat,c]>0 else '↓'}" for feat in fp]
+
+        phenotype_name = " & ".join(name_parts)
+        if len(phenotype_name) > 100:
+            phenotype_name = phenotype_name[:97] + "..."
+
+        # Build textual summary
+        summary_lines = []
+        summary_lines.append(f"Cluster {int(c)} (n={cluster_counts[int(c)]}; {100*cluster_counts[int(c)]/n_samples:.1f}%):")
+        summary_lines.append(f"  Phenotype name: {phenotype_name}")
+        summary_lines.append("  Top positive distinguishing features (z > 0):")
+        for feat, z in top_pos.items():
+            summary_lines.append(f"    {feat}: z={z:.2f} (mod={feat_to_mod[feat]}, stat={feat_to_stat[feat]})")
+        summary_lines.append("  Top negative distinguishing features (z < 0):")
+        for feat, z in top_neg[::-1].items():
+            summary_lines.append(f"    {feat}: z={z:.2f} (mod={feat_to_mod[feat]}, stat={feat_to_stat[feat]})")
+        summary_lines.append("  Modality-stat mean z-scores (examples):")
+        shown = 0
+        for (mod, stat), mz in ms_sorted:
+            summary_lines.append(f"    {mod}-{stat}: mean_z={mz:.2f}")
+            shown += 1
+            if shown >= 8:
+                break
+        summary_lines.append(f"  Representative sample indices (closest to centroid): {rep_indices[int(c)]}")
+
+        interpretations[int(c)] = {
+            'cluster': int(c),
+            'count': int(cluster_counts[int(c)]),
+            'percent': float(100*cluster_counts[int(c)]/n_samples),
+            'phenotype_name': phenotype_name,
+            'top_positive_features': top_pos.to_dict(),
+            'top_negative_features': top_neg.to_dict(),
+            'modality_stat_meanz': modality_stat_meanz[c],
+            'representative_indices': rep_indices[int(c)],
+            'text_summary': "\n".join(summary_lines)
+        }
+
+    # Save regular outputs
+    cluster_feature_means.to_csv(os.path.join(out_dir, 'cluster_feature_means.csv'))
+    cluster_feature_z.to_csv(os.path.join(out_dir, 'cluster_feature_z.csv'))
+
+    with open(os.path.join(out_dir, 'cluster_interpretations.json'), 'w') as f:
+        json.dump(interpretations, f, indent=2)
+
+    with open(os.path.join(out_dir, 'cluster_report.txt'), 'w') as ftxt:
+        title = f"Cluster Interpretation Report ({n_clusters} clusters, {n_samples} samples)\n\n"
+        ftxt.write(title)
+        for c in sorted(interpretations.keys()):
+            ftxt.write(interpretations[c]['text_summary'] + "\n\n")
+
+    # Plots: Heatmap
+    try:
+        plt.figure(figsize=(max(8, 0.15*len(feature_columns)), max(4, n_clusters*1.2)))
+        sns.heatmap(cluster_feature_z.transpose(), cmap='vlag', center=0.0, cbar_kws={'label': 'z-score'},
+                    xticklabels=True, yticklabels=[f'Cluster {int(c)}' for c in clusters])
+        plt.title('Cluster means (z-score normalized per feature)')
+        plt.xlabel('Features')
+        plt.ylabel('Clusters')
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, 'cluster_feature_z_heatmap.png'), dpi=200)
+        plt.close()
+    except Exception as e:
+        print("Warning: could not generate heatmap:", e)
+
+    # Per-cluster bar of modality-stat mean z
+    for c in clusters:
+        ms = modality_stat_meanz[c]
+        if not ms:
+            continue
+        keys, vals = zip(*sorted(ms.items(), key=lambda kv: kv[1], reverse=True))
+        labels_plot = [f"{k[0]}-{k[1]}" for k in keys[:12]]
+        vals_plot = [float(v) for v in vals[:12]]
+        try:
+            plt.figure(figsize=(10, 4))
+            sns.barplot(x=vals_plot, y=labels_plot, palette='coolwarm')
+            plt.axvline(0, color='k', linewidth=0.5)
+            plt.title(f'Cluster {int(c)}: modality-stat mean z (top)')
+            plt.xlabel('mean z-score')
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, f'cluster_{int(c)}_modstat_bar.png'), dpi=200)
+            plt.close()
+        except Exception:
+            pass
+
+    # Boxplots for union of top features across clusters
+    union_features = set()
+    for c in clusters:
+        union_features.update(list(interpretations[int(c)]['top_positive_features'].keys()))
+        union_features.update(list(interpretations[int(c)]['top_negative_features'].keys()))
+    union_features = [f for f in feature_columns if f in union_features]
+    if union_features:
+        try:
+            n_col = min(6, len(union_features))
+            plt.figure(figsize=(max(8, 2*n_col), 4*int(np.ceil(len(union_features)/n_col))))
+            for i, feat in enumerate(union_features):
+                plt.subplot(int(np.ceil(len(union_features)/n_col)), n_col, i+1)
+                sns.boxplot(x=labels, y=X[feat], palette='Set2')
+                plt.title(feat)
+                plt.xlabel('Cluster')
+                plt.tight_layout()
+            plt.suptitle('Distribution of Top Distinguishing Features by Cluster', y=1.02)
+            plt.savefig(os.path.join(out_dir, 'top_features_boxplots.png'), dpi=200, bbox_inches='tight')
+            plt.close()
+        except Exception:
+            pass
+
+    print(f"Saved interpretation files to '{out_dir}'.")
+    for c in sorted(interpretations.keys()):
+        print(interpretations[c]['text_summary'].splitlines()[0])  # single-line summary
+
+    # If requested, call an LLM to refine phenotype names & descriptions
+    if call_llm:
+        try:
+            llm_results = _call_llm_for_interpretations(
+                interpretations=interpretations,
+                out_dir=out_dir,
+                provider=llm_provider,
+                model=llm_model,
+                max_tokens=llm_max_tokens,
+                temperature=llm_temperature,
+                system_prompt=llm_system_prompt,
+                save_response=llm_save_response
+            )
+            # Merge LLM outputs into interpretations
+            for cid, rr in llm_results.items():
+                interpretations[int(cid)]['llm_refinement'] = rr
+            # save updated interpretations
+            with open(os.path.join(out_dir, 'cluster_interpretations_with_llm.json'), 'w') as f:
+                json.dump(interpretations, f, indent=2)
+            print(f"Saved LLM refinements to '{os.path.join(out_dir, 'cluster_interpretations_with_llm.json')}'.")
+        except Exception as e:
+            print("LLM refinement failed:", e)
+
+    return interpretations
+
+
+def _call_llm_for_interpretations(interpretations, out_dir='cluster_interpretation',
+                                  provider='openai', model=None,
+                                  max_tokens=None, temperature=None,
+                                  system_prompt=None, save_response=True,
+                                  request_delay=0.5):
+    """
+    Send compact cluster summaries to an LLM to request refined names, short clinical descriptions,
+    and concise distinguishing feature lists.
+
+    Provider: 'openai' or 'anthropic'
+    Model: string name. Temperature and max_tokens default selection happens here.
+    """
+
+    # Helper: choose sensible defaults for temperature and max_tokens per model family
+    def _choose_defaults(model_name, provided_temp, provided_max_tokens):
+        m = (model_name or "").lower()
+        # Default temps: creative for gpt-5/gpt-5-mini; conservative for others
+        if provided_temp is not None:
+            temp = provided_temp
+        elif 'gpt-5' in m or 'gpt-5-mini' in m:
+            temp = 1.0
+        elif 'gpt' in m:
+            temp = 0.2
+        elif 'claude' in m or 'anthropic' in m:
+            temp = 0.3
+        else:
+            temp = 0.25
+
+        # defaults for max tokens
+        if provided_max_tokens is not None:
+            max_t = provided_max_tokens
+        elif 'gpt-5' in m:
+            max_t = 1600
+        elif 'gpt-5-mini' in m:
+            max_t = 800
+        elif 'gpt' in m:
+            max_t = 1024
+        elif 'claude' in m:
+            max_t = 1200
+        else:
+            max_t = 800
+        return float(temp), int(max_t)
+
+    temp, max_toks = _choose_defaults(model, temperature, max_tokens)
+
+    # Build compact prompt for each cluster: include short cluster lines only (name, top pos/neg, mod-stat top 5)
+    cluster_texts = {}
+    for cid, info in interpretations.items():
+        lines = []
+        lines.append(f"Cluster {cid} (n={info['count']}, {info['percent']:.1f}%):")
+        lines.append(f"Current name: {info.get('phenotype_name', '')}")
+        lines.append("Top positive features:")
+        for feat, z in list(info['top_positive_features'].items())[:6]:
+            lines.append(f"  - {feat}: z={z:.2f}")
+        lines.append("Top negative features:")
+        for feat, z in list(info['top_negative_features'].items())[:6]:
+            lines.append(f"  - {feat}: z={z:.2f}")
+        # Add top modality-stat entries
+        ms = info.get('modality_stat_meanz', {})
+        ms_items = sorted(ms.items(), key=lambda kv: kv[1], reverse=True)[:6]
+        if ms_items:
+            lines.append("Modalities/stats (mean z):")
+            for (mod, stat), v in ms_items:
+                lines.append(f"  - {mod}-{stat}: {v:.2f}")
+        cluster_texts[cid] = "\n".join(lines)
+
+    # Compose a single instruction asking for structured outputs per cluster
+    instruction = textwrap.dedent("""\
+        You are an expert critical care clinician and clinical data scientist.
+        For each input cluster summary, produce:
+         1) A concise phenotype name (<= 5 words).
+         2) A 1-sentence clinical description (what is distinctive, plausible physiologic interpretation).
+         3) A bullet list of 3 key distinguishing features (short).
+         4) One short clinical implication or suggested interpretation (1 line).
+        Return output in JSON mapping cluster id -> {name, description, key_features, implication}.
+        Keep answers brief and machine-parseable. If uncertain, indicate 'uncertain' in the implication.
+        """)
+
+    if system_prompt:
+        system_prompt = system_prompt.strip()
+    else:
+        system_prompt = "You are a helpful, concise clinical phenotyping assistant."
+
+    # Build the combined user content (but keep it compact)
+    user_content_lines = [instruction, ""]
+    for cid, ct in cluster_texts.items():
+        user_content_lines.append(f"### CLUSTER {cid}\n{ct}\n")
+    user_content = "\n".join(user_content_lines)
+
+    # If content is extremely large, trim per-cluster details to essential lines
+    approx_len = len(user_content.split())
+    if approx_len > 4000:
+        # reduce details: only keep top 3 positive and top 3 negative features
+        user_content_lines = [instruction, ""]
+        for cid, info in interpretations.items():
+            lines = []
+            lines.append(f"Cluster {cid} (n={info['count']}, {info['percent']:.1f}%):")
+            lines.append(f"Current name: {info.get('phenotype_name', '')}")
+            lines.append("Top positive features:")
+            for feat, z in list(info['top_positive_features'].items())[:3]:
+                lines.append(f"  - {feat}: z={z:.2f}")
+            lines.append("Top negative features:")
+            for feat, z in list(info['top_negative_features'].items())[:3]:
+                lines.append(f"  - {feat}: z={z:.2f}")
+            user_content_lines.append("\n".join(lines))
+        user_content = "\n".join(user_content_lines)
+
+    # Prepare provider-specific calls
+    results = {}
+    timestamp = int(time.time())
+
+    if provider.lower() == 'openai':
+        if openai is None:
+            raise RuntimeError("openai package not available. Install with `pip install openai` and set OPENAI_API_KEY.")
+        api_key = os.environ.get('OPENAI_API_KEY')
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY not found in environment variables.")
+        openai.api_key = api_key
+
+        # Build chat messages
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ]
+        # Use ChatCompletion
+        model_name = model or "gpt-4o"  # fallback
+        try:
+            resp = openai.ChatCompletion.create(
+                model=model_name,
+                messages=messages,
+                temperature=temp,
+                max_tokens=max_toks,
+                n=1
+            )
+            text = resp['choices'][0]['message']['content']
+            if save_response:
+                with open(os.path.join(out_dir, f'llm_response_openai_{model_name}_{timestamp}.txt'), 'w') as f:
+                    f.write(text)
+                with open(os.path.join(out_dir, f'llm_response_openai_{model_name}_{timestamp}.json'), 'w') as f:
+                    json.dump(resp, f, indent=2)
+            # Try to parse as JSON; if not valid, return raw text under a special key
+            try:
+                parsed = json.loads(text)
+                results = {int(k): v for k, v in parsed.items()}
+            except Exception:
+                # attempt to extract JSON-like block
+                import re
+                m = re.search(r'\{.*\}', text, re.S)
+                if m:
+                    try:
+                        parsed = json.loads(m.group(0))
+                        results = {int(k): v for k, v in parsed.items()}
+                    except Exception:
+                        results = {'_raw': text}
+                else:
+                    results = {'_raw': text}
+        except Exception as e:
+            raise RuntimeError(f"OpenAI API request failed: {e}")
+
+    elif provider.lower() in ('anthropic', 'claude'):
+        # Anthropic / Claude
+        if Anthropic is None:
+            raise RuntimeError("anthropic package not available. Install with `pip install anthropic` and set ANTHROPIC_API_KEY.")
+        api_key = os.environ.get('ANTHROPIC_API_KEY')
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY not found in environment variables.")
+        client = Anthropic(api_key=api_key)
+        # Construct prompt according to Anthropic API style: system + user content
+        prompt = f"{system_prompt}\n\n{user_content}\n\nPlease answer in JSON."
+        model_name = model or "claude-2.1"
+        try:
+            resp = client.completions.create(
+                model=model_name,
+                prompt=prompt,
+                max_tokens_to_sample=max_toks,
+                temperature=float(temp)
+            )
+            text = resp["completion"]
+            if save_response:
+                with open(os.path.join(out_dir, f'llm_response_anthropic_{model_name}_{timestamp}.txt'), 'w') as f:
+                    f.write(text)
+                with open(os.path.join(out_dir, f'llm_response_anthropic_{model_name}_{timestamp}.json'), 'w') as f:
+                    json.dump(resp, f, indent=2)
+            try:
+                parsed = json.loads(text)
+                results = {int(k): v for k, v in parsed.items()}
+            except Exception:
+                # fallback raw
+                results = {'_raw': text}
+        except Exception as e:
+            raise RuntimeError(f"Anthropic API request failed: {e}")
+
+    else:
+        raise ValueError("Unsupported LLM provider. Choose 'openai' or 'anthropic'/'claude'.")
+
+    # If the LLM returned a raw string, attempt to split by cluster markers heuristically
+    if results and isinstance(results, dict) and '_raw' in results:
+        raw_text = results['_raw']
+        # Heuristic parsing: find cluster headings and collect following lines
+        parsed_map = {}
+        lines = raw_text.splitlines()
+        current = None
+        buffer = []
+        for ln in lines:
+            ln_strip = ln.strip()
+            if ln_strip.lower().startswith('cluster'):
+                # flush previous
+                if current is not None:
+                    parsed_map[current] = "\n".join(buffer).strip()
+                # set new
+                parts = ln_strip.split()
+                # attempt to get cluster id
+                try:
+                    cid = int(parts[1].strip(':'))
+                except Exception:
+                    cid = '_unknown'
+                current = cid
+                buffer = [ln_strip]
+            else:
+                if current is None:
+                    continue
+                buffer.append(ln)
+        if current is not None:
+            parsed_map[current] = "\n".join(buffer).strip()
+        # store as text descriptions per cluster
+        results = {}
+        for k, v in parsed_map.items():
+            results[int(k) if isinstance(k, int) else k] = {'raw_text': v}
+
+    # Return the results mapping cluster -> refinement
+    return results
+```
+
+---
+
+Q: Thanks. Could you please refine and modify the code in context, as the contexted code is yielding mostly missing information. Generated report: ......## LLM INTERPRETATION.....### GPT-5-MINI INTERPRETATION --- ...## CONSENSUS INSIGHTS *This section would benefit from manual review to identify common themes across LLM responses*  ## CLINICAL RECOMMENDATIONS *Synthesize actionable recommendations from the LLM interpretations* ## FUTURE RESEARCH DIRECTIONS *Compile suggested research directions from the analyses*
+A:
+Certainly! Let's break it down into two sections:
+
+### 1. Explanation:
+The code in context is designed to interpret clustering results from sepsis phenotype analysis using various Large Language Models (LLMs) such as OpenAI's GPT models and Anthropic's Claude models. The main goal is to generate comprehensive clinical interpretation reports based on the clustering of sepsis phenotypes.
+
+Here's a simplified explanation of the key components:
+- **Model Configuration**: The code defines configurations for different LLM models, including their API endpoints, costs, and token limits.
+- **Data Analysis**: It analyzes clustering results, computes statistics for each cluster, and identifies key features that distinguish each cluster.
+- **Prompt Creation**: The code creates a detailed prompt for the LLMs, which includes clinical context and specific tasks for interpretation.
+- **LLM Querying**: It sends the prompt to selected LLMs and retrieves their responses.
+- **Report Generation**: The responses from the LLMs are compiled into a comparative report, which includes sections for executive summary, cluster distribution, and LLM interpretations.
+- **Cost Estimation**: The code estimates the cost of using different LLMs based on the number of tokens processed.
+- **Saving Results**: The analysis results, LLM responses, and the final report are saved to files for further review.
+
+### 2. Modified Code:
+The main issue seems to be that the generated report sections are mostly placeholders without actual content. This could be due to the LLM not providing meaningful responses or the code not correctly handling the responses. Below is an improved version of the `query_llm_model` function to ensure it handles responses properly and integrates them into the report:
+
+```python
+def query_llm_model(self, prompt: str, model_name: str) -> str:
+    """
+    Query a specific LLM model with the interpretation prompt - FIXED VERSION
+    
+    Args:
+        prompt: Interpretation prompt
+        model_name: Name of the model to query
+        
+    Returns:
+        Model response string
+    """
+    if model_name not in self.model_configs:
+        return f"Error: Unknown model '{model_name}'"
+    
+    config = self.model_configs[model_name]
+    
+    try:
+        print(f"Querying {config.name}...")
+        
+        if config.api_endpoint == "openai":
+            if not self.openai_client:
+                return f"Error: OpenAI client not initialized for {model_name}"
+            
+            # FIXED: Handle None max_tokens properly with GPT-5 support
+            max_tokens_value = config.max_tokens if config.max_tokens is not None else 4000
+            max_tokens_to_use = min(4000, max_tokens_value)
+            
+            # Check if model uses max_completion_tokens instead (GPT-5 models)
+            if config.max_completion_tokens and config.max_tokens is None:
+                # GPT-5 models use max_completion_tokens
+                completion_kwargs = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": "You are an expert intensive care physician and clinical researcher specializing in sepsis pathophysiology and personalized medicine. Provide detailed, evidence-based clinical interpretations."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_completion_tokens": min(4000, config.max_completion_tokens),
+                    "temperature": config.temperature
+                }
+            else:
+                # Standard GPT models use max_tokens
+                completion_kwargs = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": "You are an expert intensive care physician and clinical researcher specializing in sepsis pathophysiology and personalized medicine. Provide detailed, evidence-based clinical interpretations."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_tokens": max_tokens_to_use,
+                    "temperature": config.temperature
+                }
+            
+            response = self.openai_client.chat.completions.create(**completion_kwargs)
+            if response.choices and response.choices[0].message:
+                return response.choices[0].message.content
+            else:
+                return "Error: No valid response from the LLM."
+                
+        elif config.api_endpoint == "anthropic":
+            if not self.anthropic_client:
+                return f"Error: Anthropic client not initialized for {model_name}"
+            
+            # Map model names to Anthropic model IDs
+            anthropic_model_map = {
+                "claude-3-haiku": "claude-3-haiku-20240307",
+                "claude-3-sonnet": "claude-3-5-sonnet-20241022"
+            }
+            
+            anthropic_model_id = anthropic_model_map.get(model_name, "claude-3-5-sonnet-20241022")
+            
+            # FIXED: Handle None max_tokens properly for Anthropic
+            max_tokens_value = config.max_tokens if config.max_tokens is not None else 4000
+            max_tokens_to_use = min(4000, max_tokens_value)
+            
+            response = self.anthropic_client.messages.create(
+                model=anthropic_model_id,
+                max_tokens=max_tokens_to_use,
+                temperature=config.temperature,
+                system="You are an expert intensive care physician and clinical researcher specializing in sepsis pathophysiology and personalized medicine. Provide detailed, evidence-based clinical interpretations.",
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            if response and response.content:
+                return response.content[0].text
+            else:
+                return "Error: No valid response from the LLM."
+                
+        else:
+            return f"Error: Unsupported API endpoint '{config.api_endpoint}' for {model_name}"
+            
+    except Exception as e:
+        return f"Error querying {model_name}: {str(e)}"
+```
+
+### Key Improvements:
+- **Error Handling**: Improved error handling to ensure that if the LLM does not return a valid response, an appropriate error message is logged.
+- **Response Check**: Added checks to ensure that the response from the LLM is valid and contains the expected content.
+- **Fallback Messages**: If no valid response is received, the function returns a clear error message instead of leaving sections blank.
+
+These improvements should help ensure that the report sections are populated with meaningful content or clear error messages, rather than being left empty.
+
+---
+

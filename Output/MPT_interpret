@@ -1,0 +1,2539 @@
+Q: Please make a python code to read the attached example physiomarkers.csv for a patient, and concisely interpret with LLM models (openai and claude popular models) with the given feature meaning context.
+A:
+1. Explanation
+
+This code reads the provided physiomarkers.csv (one row of aggregated physiomarkers for a patient), picks a concise set of clinically meaningful features (heart rate, blood pressure, respiratory rate, HRV metrics, key ECG intervals, PPG pulse rate and stiffness indices), converts each into a short human-readable summary (including description and units from the feature reference), and builds a compact prompt that asks two LLMs (OpenAI and Anthropic/Claude) to interpret the findings concisely.
+
+It:
+- Loads the CSV and extracts the first row of features.
+- Maps selected feature IDs to readable descriptions and units (using the reference table).
+- Creates a short structured summary of values for the LLMs.
+- Calls OpenAI (gpt-4 / gpt-3.5-turbo) and Anthropic (Claude models) via their APIs (keys read from environment variables) and prints the concise interpretations.
+- Provides protections: uses environment variables for API keys, limits tokens, and instructs the LLMs to avoid making definitive diagnoses and to state uncertainty and recommended next steps.
+
+Notes:
+- Install dependencies with: pip install pandas openai anthropic
+- Set environment variables OPENAI_API_KEY and ANTHROPIC_API_KEY before running.
+- You can modify selected_features to include other features from the CSV or expand the mapping.
+
+2. Modified Code
+
+```python
+#!/usr/bin/env python3
+# Minimal example: read physiomarkers.csv, summarize key features, ask OpenAI + Anthropic (Claude) for concise interpretation.
+# Requirements: pandas, openai, anthropic
+# Install: pip install pandas openai anthropic
+
+import os
+import pandas as pd
+import json
+import time
+
+# Optional: import OpenAI and Anthropic clients
+try:
+    import openai
+except Exception:
+    openai = None
+
+try:
+    from anthropic import Anthropic, HUMAN_PROMPT, AI_PROMPT
+except Exception:
+    Anthropic = None
+    HUMAN_PROMPT = ""
+    AI_PROMPT = ""
+
+# CONFIG: path to CSV and which LLM models to call
+CSV_PATH = "physiomarkers.csv"  # change as needed
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")  # fallback to gpt-4 if available
+OPENAI_FALLBACK = "gpt-3.5-turbo"
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-2.1")  # update to whichever Claude model you have access to
+
+# A concise mapping of commonly interpreted features -> (readable name, units)
+# Extend this dict with any features you want to include.
+FEATURE_MAP = {
+    "ECG_HR_bpm_mean": ("ECG mean heart rate", "bpm"),
+    "ECG_T_rr_ms_mean": ("ECG mean RR interval", "ms"),
+    "ECG_qt_interval_ms_mean": ("QT interval", "ms"),
+    "ECG_qtc_interval_ms_mean": ("Corrected QT (QTc)", "ms"),
+    "HRV_HRV_SDNN": ("HRV SDNN (overall variability)", "ms"),
+    "HRV_HRV_RMSSD": ("HRV RMSSD (short-term vagal)", "ms"),
+    "ABP_SBP_mean": ("Systolic blood pressure (mean)", "mmHg"),
+    "ABP_DBP_mean": ("Diastolic blood pressure (mean)", "mmHg"),
+    "ABP_MAP_mean": ("Mean arterial pressure", "mmHg"),
+    "RESP_resp_rate_Bpm_mean": ("Respiratory rate (mean)", "breaths/min"),
+    "PPG_PR_mean": ("PPG pulse rate (mean)", "bpm"),
+    "PPG_SI_mean": ("PPG Stiffness Index (mean)", "dimensionless"),
+    "PPG_RI_mean": ("PPG Reflection Index (mean)", "dimensionless"),
+    "PPG_pat_ms_mean": ("Pulse arrival time (PAT mean)", "ms"),
+    "PPG_Augmentation_index_mean": ("Augmentation index (mean)", "%"),
+    # add more keys from the CSV as needed
+}
+
+# Helper: build human-readable summary for the selected features
+def build_feature_summary(df_row, feature_map):
+    lines = []
+    found_any = False
+    for fid, (label, unit) in feature_map.items():
+        if fid in df_row:
+            val = df_row[fid]
+            # convert pd.NA / nan to string
+            if pd.isna(val):
+                display = "N/A"
+            else:
+                # Pretty formatting for floats/ints
+                if isinstance(val, (float, int)):
+                    display = f"{val:.3f}" if isinstance(val, float) else str(val)
+                else:
+                    display = str(val)
+            lines.append(f"- {label} ({fid}) — {display} {unit}")
+            found_any = True
+    if not found_any:
+        lines.append("(No mapped features were found in the CSV row. Expand FEATURE_MAP.)")
+    return "\n".join(lines)
+
+# Helper: create an LLM-friendly compact prompt
+def create_prompt(summary_text, guidance=None, max_findings=6):
+    guidance = guidance or (
+        "You are a clinical-style assistant producing a concise (3-6 bullet) interpretation. "
+        "Do NOT provide a definitive diagnosis. For each key finding, give 1 brief potential implication "
+        "and the degree of certainty (low/medium/high). Then provide 2 suggested non-urgent next steps "
+        "(e.g., repeat measurement, specific monitoring, clinical correlation). Keep the whole reply under ~200 words."
+    )
+    prompt = (
+        "Patient physiomarkers: \n\n"
+        f"{summary_text}\n\n"
+        "Context: Use the provided single aggregated values. Interpret concisely. "
+        f"{guidance}\n\n"
+        "Return format: Plain text, short bullets. If a value is missing, note it. Mention uncertainties and limitations."
+    )
+    return prompt
+
+# Call OpenAI ChatCompletion (Chat API)
+def call_openai(prompt, model=OPENAI_MODEL, max_tokens=300, temperature=0.2):
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        print("OPENAI_API_KEY not set; skipping OpenAI call.")
+        return None
+    if openai is None:
+        print("openai package not installed; skipping OpenAI call.")
+        return None
+    openai.api_key = key
+    try:
+        # Try preferred model, fallback to gpt-3.5-turbo if model not available
+        resp = openai.ChatCompletion.create(
+            model=model,
+            messages=[{"role": "system", "content": "You are a concise clinical summarizer."},
+                      {"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        text = resp["choices"][0]["message"]["content"].strip()
+        return {"model": model, "text": text, "meta": resp}
+    except Exception as e:
+        print(f"OpenAI call failed for model {model}: {e}")
+        if model != OPENAI_FALLBACK:
+            print(f"Retrying with fallback model {OPENAI_FALLBACK} ...")
+            try:
+                resp = openai.ChatCompletion.create(
+                    model=OPENAI_FALLBACK,
+                    messages=[{"role": "system", "content": "You are a concise clinical summarizer."},
+                              {"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                text = resp["choices"][0]["message"]["content"].strip()
+                return {"model": OPENAI_FALLBACK, "text": text, "meta": resp}
+            except Exception as e2:
+                print(f"Fallback OpenAI call failed: {e2}")
+        return None
+
+# Call Anthropic / Claude via anthropic package
+def call_claude(prompt, model=CLAUDE_MODEL, max_tokens=300, temperature=0.2):
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        print("ANTHROPIC_API_KEY not set; skipping Claude call.")
+        return None
+    if Anthropic is None:
+        print("anthropic package not installed; skipping Claude call.")
+        return None
+    client = Anthropic(api_key=key)
+    try:
+        # Use the HUMAN_PROMPT/AI_PROMPT wrapper if available
+        full_prompt = HUMAN_PROMPT + prompt + AI_PROMPT
+        resp = client.completions.create(
+            model=model,
+            prompt=full_prompt,
+            max_tokens_to_sample=max_tokens,
+            temperature=temperature,
+        )
+        text = resp["completion"].strip()
+        return {"model": model, "text": text, "meta": resp}
+    except Exception as e:
+        print(f"Anthropic call failed: {e}")
+        return None
+
+def main():
+    # Read CSV and get the first (and only) row of physiomarkers
+    if not os.path.exists(CSV_PATH):
+        print(f"CSV file not found: {CSV_PATH}. Provide the correct path.")
+        return
+    df = pd.read_csv(CSV_PATH)
+    if df.shape[0] < 1:
+        print("CSV appears empty.")
+        return
+    row = df.iloc[0].to_dict()
+
+    # Build feature summary using our mapping
+    summary = build_feature_summary(row, FEATURE_MAP)
+    print("---- Compact feature summary sent to LLMs ----\n")
+    print(summary)
+    print("\n---------------------------------------------\n")
+
+    # Create prompt
+    prompt = create_prompt(summary)
+
+    # Call OpenAI
+    print("Calling OpenAI...")
+    openai_result = call_openai(prompt)
+    if openai_result:
+        print(f"\n--- OpenAI ({openai_result['model']}) concise interpretation ---\n")
+        print(openai_result["text"])
+    else:
+        print("\nOpenAI call skipped or failed.\n")
+
+    # Small pause to avoid rate-limiting collisions
+    time.sleep(0.8)
+
+    # Call Claude (Anthropic)
+    print("\nCalling Anthropic/Claude...")
+    claude_result = call_claude(prompt)
+    if claude_result:
+        print(f"\n--- Claude ({claude_result['model']}) concise interpretation ---\n")
+        print(claude_result["text"])
+    else:
+        print("\nClaude call skipped or failed.\n")
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+Q: Why did you include just a few features under FEATURE_MAP? Modify the code to provide a useful, detailed, clinically relevant interpretation report with a short report card.
+A:
+1. Explanation
+
+- What this update does: it reads the attached physiomarkers.csv (first row), extracts a larger set of clinically meaningful features (ECG heart rate and intervals, blood pressures, simple HRV metrics, respiratory rate, PPG pulse/arrival/stiffness measures, and a few hemodynamic indices), and produces a structured, clinically-focused interpretation report plus a short "report card" grade per category (Cardiac rhythm, ECG intervals, Hemodynamics, Autonomic/HRV, Respiratory, Peripheral/PPG).
+- How the interpretation works: for each mapped feature the code shows the numeric value, an approximate clinical reference range (marked as approximate when necessary), a status (Normal / Borderline / Abnormal / Informational / Missing), and a one-line plain-language implication. It also summarizes category-level abnormalities into a short grade (A–E). The code is careful to call out uncertainties and limitations.
+- LLM integration: the code still optionally builds a concise prompt and can call OpenAI and Anthropic/Claude models (if API keys are present) to create a short clinician-style narrative interpretation from the same structured data. LLM calls are optional and safe-guarded (API keys via environment variables).
+- Why earlier code included only a few features: previously a small FEATURE_MAP was used to keep examples short and to show the approach. This updated code expands the mapping to more clinically relevant features and adds automated evaluation logic and a report-card summary.
+- Safety / limitations: the code uses approximate reference ranges (documented in outputs), does not provide definitive diagnoses, and recommends clinical correlation and repeat/confirmatory testing where appropriate.
+
+2. Modified Code
+
+```python
+#!/usr/bin/env python3
+"""
+Read physiomarkers.csv (single aggregated row), evaluate a broader set of clinically-relevant features,
+produce a detailed interpretation report and a short report-card by category, and optionally ask LLMs
+(OpenAI / Anthropic) for a concise narrative.
+Requirements: pandas, (optional) openai, (optional) anthropic
+Install: pip install pandas openai anthropic
+Set OPENAI_API_KEY and/or ANTHROPIC_API_KEY to enable LLM calls.
+"""
+import os
+import pandas as pd
+import time
+import math
+
+# Optional LLM clients
+try:
+    import openai
+except Exception:
+    openai = None
+
+try:
+    from anthropic import Anthropic, HUMAN_PROMPT, AI_PROMPT
+except Exception:
+    Anthropic = None
+    HUMAN_PROMPT = ""
+    AI_PROMPT = ""
+
+CSV_PATH = "physiomarkers.csv"  # adjust as needed
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
+OPENAI_FALLBACK = "gpt-3.5-turbo"
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-2.1")
+
+# Map feature id -> (human label, unit)
+FEATURE_MAP = {
+    # ECG / rhythm
+    "ECG_HR_bpm_mean": ("ECG mean heart rate", "bpm"),
+    "ECG_T_rr_ms_mean": ("ECG mean RR interval", "ms"),
+    # ECG intervals
+    "ECG_qt_interval_ms_mean": ("QT interval", "ms"),
+    "ECG_qtc_interval_ms_mean": ("Corrected QT (QTc)", "ms"),
+    "ECG_pr_interval_ms_mean": ("PR interval", "ms"),
+    "ECG_QRS_duration_mean": ("QRS duration", "ms"),
+    "ECG_P_duration_mean": ("P-wave duration", "ms"),
+    # Blood pressure / hemodynamics
+    "ABP_SBP_mean": ("Systolic blood pressure (mean)", "mmHg"),
+    "ABP_DBP_mean": ("Diastolic blood pressure (mean)", "mmHg"),
+    "ABP_MAP_mean": ("Mean arterial pressure (mean)", "mmHg"),
+    "ABP_ShockIndex_mean": ("Shock index (HR/SBP mean)", "ratio"),
+    "ABP_CO_mean": ("Cardiac output (mean)", "L/min"),  # may be missing in many datasets
+    "ABP_TPR_mean": ("Total peripheral resistance (mean)", "dyn·s/cm^5"),
+    # Respiratory
+    "RESP_resp_rate_Bpm_mean": ("Respiratory rate (mean)", "breaths/min"),
+    # HRV / autonomic
+    "HRV_HRV_SDNN": ("HRV SDNN (overall variability)", "ms"),
+    "HRV_HRV_RMSSD": ("HRV RMSSD (short-term vagal)", "ms"),
+    "HRV_HRV_pNN50": ("HRV pNN50 (fraction)", ""),  # sometimes 0..1 or percent
+    # PPG / peripheral
+    "PPG_PR_mean": ("PPG pulse rate (mean)", "bpm"),
+    "PPG_pat_ms_mean": ("Pulse arrival time (PAT mean)", "ms"),
+    "PPG_SI_mean": ("PPG Stiffness Index (mean)", "unitless"),
+    "PPG_RI_mean": ("PPG Reflection Index (mean)", "unitless"),
+    "PPG_Augmentation_index_mean": ("PPG Augmentation Index (mean)", "%"),
+    # add or adjust as needed...
+}
+
+# Approximate clinical reference ranges (coarse). These are approximate and context dependent.
+# Format: (low, high, note) where low/high can be None if not meaningful.
+NORMAL_RANGES = {
+    "ECG_HR_bpm_mean": (60, 100, "Adult resting HR; context dependent"),
+    "ECG_T_rr_ms_mean": (600, 1000, "RR in ms ≈ 60-100 bpm"),
+    "ECG_qt_interval_ms_mean": (300, 450, "QT (ms) typical range; depends on HR"),
+    "ECG_qtc_interval_ms_mean": (None, 440, "QTc: >440 ms (approx) may be prolonged; sex-specific"),
+    "ECG_pr_interval_ms_mean": (120, 200, "PR interval normal 120–200 ms"),
+    "ECG_QRS_duration_mean": (0, 120, "QRS <120 ms normal; >120ms wide"),
+    "ECG_P_duration_mean": (80, 120, "P-wave usually <120 ms"),
+    "ABP_SBP_mean": (90, 140, "Systolic BP (approx normal range)"),
+    "ABP_DBP_mean": (60, 90, "Diastolic BP (approx normal range)"),
+    "ABP_MAP_mean": (65, 110, "Mean arterial pressure; perfusion depends on patient"),
+    "ABP_ShockIndex_mean": (0.5, 0.7, "Shock Index (HR/SBP) typical 0.5-0.7; >0.9 concerning"),
+    "ABP_CO_mean": (3.0, 7.0, "Cardiac output typical resting L/min"),
+    "RESP_resp_rate_Bpm_mean": (12, 20, "Adult resting RR"),
+    "HRV_HRV_SDNN": (50, 150, "Short-term SDNN approx; low values suggest reduced variability"),
+    "HRV_HRV_RMSSD": (20, 50, "RMSSD typical short-term vagal marker"),
+    "HRV_HRV_pNN50": (0.1, 0.4, "pNN50 fraction (approx); dataset may be percent or fraction"),
+    "PPG_PR_mean": (60, 100, "Pulse rate should roughly match ECG HR"),
+    "PPG_pat_ms_mean": (180, 400, "Pulse arrival time roughly 180–400 ms depending on system"),
+    "PPG_SI_mean": (None, None, "Stiffness index is device/population dependent — interpret relative changes"),
+    "PPG_RI_mean": (None, None, "Reflection index is relative; use for trends"),
+    "PPG_Augmentation_index_mean": (-50, 50, "Augmentation indices vary by age; interpret with caution"),
+}
+
+# Category names by prefix for the short report card
+CATEGORY_PREFIXES = {
+    "ECG_": "Cardiac / ECG",
+    "HRV_": "Autonomic / HRV",
+    "RESP_": "Respiratory",
+    "ABP_": "Hemodynamics / Blood pressure",
+    "PPG_": "Peripheral / PPG",
+}
+
+def get_category_for_feature(fid):
+    for pfx, name in CATEGORY_PREFIXES.items():
+        if fid.startswith(pfx):
+            return name
+    return "Other"
+
+def numeric_ok(val):
+    return val is not None and (not (isinstance(val, float) and math.isnan(val)))
+
+def evaluate_value(fid, val):
+    """
+    Return (status, note) where status in {"Normal","Borderline","Abnormal","Informational","Missing"}.
+    Uses NORMAL_RANGES where available; if not available, returns Informational with note.
+    """
+    if val is None:
+        return "Missing", "No value"
+    try:
+        v = float(val)
+    except Exception:
+        return "Missing", "Non-numeric"
+    if math.isnan(v):
+        return "Missing", "NaN"
+
+    if fid not in NORMAL_RANGES:
+        return "Informational", "No approximate range available; interpret in clinical context"
+
+    low, high, note = NORMAL_RANGES[fid]
+    # If both low and high are provided:
+    if low is not None and high is not None:
+        # tolerate slight rounding; define borderline windows (10% beyond range)
+        margin_low = low * 0.9 if low != 0 else low - 0.1
+        margin_high = high * 1.1
+        if low <= v <= high:
+            return "Normal", note or ""
+        if margin_low <= v < low or high < v <= margin_high:
+            return "Borderline", f"Near threshold; {note or ''}"
+        return "Abnormal", f"Outside typical range; {note or ''}"
+    elif low is None and high is not None:
+        if v <= high:
+            return "Normal", note or ""
+        elif v <= high * 1.1:
+            return "Borderline", f"Near high threshold; {note or ''}"
+        else:
+            return "Abnormal", f"Above expected; {note or ''}"
+    elif low is not None and high is None:
+        if v >= low:
+            return "Normal", note or ""
+        elif v >= low * 0.9:
+            return "Borderline", f"Near low threshold; {note or ''}"
+        else:
+            return "Abnormal", f"Below expected; {note or ''}"
+    else:
+        return "Informational", "No numeric range defined"
+
+def build_feature_rows(row):
+    """Build list of dicts with evaluation for each mapped feature present in the row."""
+    results = []
+    for fid, (label, unit) in FEATURE_MAP.items():
+        raw = row.get(fid, None)
+        if pd.isna(raw):
+            raw = None
+        status, note = evaluate_value(fid, raw)
+        # short plain-language implication
+        implication = build_implication(fid, raw, status)
+        results.append({
+            "feature_id": fid,
+            "label": label,
+            "unit": unit,
+            "value": raw,
+            "status": status,
+            "note": note,
+            "implication": implication,
+            "category": get_category_for_feature(fid),
+        })
+    return results
+
+def build_implication(fid, value, status):
+    """Return a one-line plain language implication for common features."""
+    if value is None or status == "Missing":
+        return "Value not available."
+    try:
+        v = float(value)
+    except Exception:
+        return "Non-numeric value; cannot interpret."
+    # Simple heuristics
+    if fid == "ECG_HR_bpm_mean":
+        if v < 50:
+            return "Bradycardia range — correlate clinically (symptoms, meds)."
+        if v > 110:
+            return "Tachycardia range — consider fever, pain, dehydration, arrhythmia."
+        return "Rate within expected resting range."
+    if fid == "RESP_resp_rate_Bpm_mean":
+        if v < 10:
+            return "Low respiratory rate — evaluate ventilatory status."
+        if v > 24:
+            return "Tachypnea — consider respiratory distress, metabolic acidosis, pain, fever."
+        return "Respiratory rate within expected resting range."
+    if fid in ("ABP_SBP_mean", "ABP_DBP_mean", "ABP_MAP_mean"):
+        return "Hemodynamic measure — interpret together with symptoms and perfusion."
+    if fid in ("ECG_qt_interval_ms_mean", "ECG_qtc_interval_ms_mean"):
+        if status == "Abnormal":
+            return "Prolonged QT/QTc — consider drug effects, electrolytes, and clinical context."
+        return "QT interval within referenced range."
+    if fid == "ECG_QRS_duration_mean":
+        if v >= 120:
+            return "Wide QRS — consider bundle branch block or conduction delay."
+        return "QRS duration within expected range."
+    if fid in ("HRV_HRV_SDNN", "HRV_HRV_RMSSD", "HRV_HRV_pNN50"):
+        if status == "Abnormal":
+            return "Low HRV — may indicate reduced autonomic variability; interpret with context."
+        return "HRV metric in expected range for short-term recording."
+    if fid == "PPG_pat_ms_mean":
+        return "Pulse arrival time (surrogate for arterial stiffness and BP); interpret relative changes."
+    if fid in ("PPG_SI_mean", "PPG_RI_mean", "PPG_Augmentation_index_mean"):
+        return "Peripheral waveform index; interpret trend-wise and with device-specific norms."
+    return "No specific implication coded; review in clinical context."
+
+def category_summary(rows):
+    """Compute simple counts and a grade for each category."""
+    by_cat = {}
+    for r in rows:
+        cat = r["category"]
+        by_cat.setdefault(cat, []).append(r)
+    summaries = {}
+    for cat, items in by_cat.items():
+        total = len(items)
+        abnormal = sum(1 for it in items if it["status"] == "Abnormal")
+        borderline = sum(1 for it in items if it["status"] == "Borderline")
+        informational = sum(1 for it in items if it["status"] == "Informational")
+        missing = sum(1 for it in items if it["status"] == "Missing")
+        # Derive a grade: A best -> E worst based on proportion abnormal+borderline
+        score = (abnormal + 0.5 * borderline) / total if total > 0 else 0
+        if score == 0:
+            grade = "A"
+        elif score <= 0.2:
+            grade = "B"
+        elif score <= 0.4:
+            grade = "C"
+        elif score <= 0.7:
+            grade = "D"
+        else:
+            grade = "E"
+        summaries[cat] = {
+            "total": total,
+            "abnormal": abnormal,
+            "borderline": borderline,
+            "informational": informational,
+            "missing": missing,
+            "score": round(score, 3),
+            "grade": grade,
+        }
+    return summaries
+
+def build_report_text(rows, cat_summary):
+    """Create a textual report: header, per-feature lines, per-category card, and action items."""
+    lines = []
+    lines.append("Clinical physiomarkers detailed report\n")
+    lines.append("Note: reference ranges are approximate. This is a single aggregated row; correlate with clinical context and raw waveforms.\n")
+    # Per-feature details
+    lines.append("Findings:")
+    for r in rows:
+        val_str = "N/A" if r["value"] is None else f"{r['value']}"
+        unit = f" {r['unit']}" if r['unit'] else ""
+        lines.append(f"- {r['label']} ({r['feature_id']}): {val_str}{unit} — {r['status']}. {r['implication']} ({r['note']})")
+    lines.append("\nReport card (by category):")
+    for cat, s in cat_summary.items():
+        lines.append(f"- {cat}: Grade {s['grade']} (abnormal {s['abnormal']}/{s['total']}, borderline {s['borderline']}, score {s['score']})")
+    # Top-level concise interpretation bullets (auto-derived)
+    lines.append("\nConcise interpretation (auto):")
+    # Identify the top 3 abnormal findings to highlight
+    abn = [r for r in rows if r["status"] == "Abnormal"]
+    bdr = [r for r in rows if r["status"] == "Borderline"]
+    if abn:
+        top = abn[:4]
+        lines.append("- Key abnormal findings:")
+        for t in top:
+            lines.append(f"  • {t['label']}: {t['value']} {t['unit']} — {t['implication']}")
+    else:
+        lines.append("- No strongly abnormal values detected in the mapped features.")
+    if bdr:
+        lines.append("- Borderline observations to watch:")
+        for t in bdr[:4]:
+            lines.append(f"  • {t['label']}: {t['value']} {t['unit']} — {t['implication']}")
+    # Suggested next steps (non-urgent standard suggestions)
+    lines.append("\nSuggested next steps (non-urgent):")
+    lines.append("1) Verify abnormal values against raw data and clinical context (ECG strips, bladder/arterial waveform, cuff/clinical BP).")
+    lines.append("2) Review medications and electrolytes if QT/QTc prolonged or HRV very low.")
+    lines.append("3) Repeat measurement or continuous monitoring if hemodynamic instability suspected (MAP, Shock Index).")
+    lines.append("4) Consider targeted testing (12-lead ECG, ABG, labs) based on the top abnormal findings.")
+    lines.append("\nUncertainty & limitations: single aggregated row; device-specific indices (PPG SI/RI, Augmentation Index) often need population-specific norms. Not a diagnosis.")
+    return "\n".join(lines)
+
+def create_prompt_for_llm(report_text, max_bullets=5):
+    guidance = (
+        "You are a clinical-style assistant. Using the structured report below, produce a concise interpretation in 4-6 short bullets "
+        "— each bullet: finding, brief implication, and degree of certainty (low/medium/high). "
+        "Do NOT provide definitive diagnoses. Conclude with 2 recommended non-urgent next steps. Keep result under ~200 words."
+    )
+    prompt = f"Structured physiomarkers report:\n\n{report_text}\n\n{guidance}"
+    return prompt
+
+# OpenAI / Anthropic wrappers (optional)
+def call_openai(prompt, model=OPENAI_MODEL, max_tokens=300, temperature=0.2):
+    key = os.getenv("OPENAI_API_KEY")
+    if not key or openai is None:
+        print("(OpenAI not called: API key/package missing.)")
+        return None
+    openai.api_key = key
+    try:
+        resp = openai.ChatCompletion.create(
+            model=model,
+            messages=[{"role": "system", "content": "You are a concise clinical summarizer."},
+                      {"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        text = resp["choices"][0]["message"]["content"].strip()
+        return {"model": model, "text": text}
+    except Exception as e:
+        print(f"OpenAI call failed: {e}")
+        # try fallback
+        try:
+            resp = openai.ChatCompletion.create(
+                model=OPENAI_FALLBACK,
+                messages=[{"role": "system", "content": "You are a concise clinical summarizer."},
+                          {"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            text = resp["choices"][0]["message"]["content"].strip()
+            return {"model": OPENAI_FALLBACK, "text": text}
+        except Exception as e2:
+            print(f"OpenAI fallback failed: {e2}")
+            return None
+
+def call_claude(prompt, model=CLAUDE_MODEL, max_tokens=300, temperature=0.2):
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key or Anthropic is None:
+        print("(Claude not called: API key/package missing.)")
+        return None
+    client = Anthropic(api_key=key)
+    try:
+        full_prompt = HUMAN_PROMPT + prompt + AI_PROMPT
+        resp = client.completions.create(
+            model=model,
+            prompt=full_prompt,
+            max_tokens_to_sample=max_tokens,
+            temperature=temperature,
+        )
+        text = resp["completion"].strip()
+        return {"model": model, "text": text}
+    except Exception as e:
+        print(f"Anthropic call failed: {e}")
+        return None
+
+def main():
+    if not os.path.exists(CSV_PATH):
+        print(f"CSV not found at {CSV_PATH}. Place physiomarkers.csv in the working directory or change CSV_PATH.")
+        return
+    df = pd.read_csv(CSV_PATH)
+    if df.shape[0] < 1:
+        print("CSV has no rows.")
+        return
+    row = df.iloc[0].to_dict()
+
+    rows = build_feature_rows(row)
+    cat_summary = category_summary(rows)
+    report_text = build_report_text(rows, cat_summary)
+
+    # Print the detailed report to stdout
+    print("\n" + "="*80 + "\nDETAILED PHYSIOMARKERS REPORT\n" + "="*80 + "\n")
+    print(report_text)
+    print("\n" + "="*80 + "\nEND REPORT\n" + "="*80 + "\n")
+
+    # Build a concise prompt and (optionally) call LLMs for a short narrative
+    prompt = create_prompt_for_llm(report_text)
+    print("Attempting optional LLM summarization (if API keys configured)...\n")
+
+    # OpenAI
+    openai_result = call_openai(prompt)
+    if openai_result:
+        print(f"--- OpenAI ({openai_result['model']}) concise interpretation ---\n")
+        print(openai_result["text"])
+    else:
+        print("(OpenAI summary skipped or failed.)")
+
+    time.sleep(0.7)
+
+    # Claude / Anthropic
+    claude_result = call_claude(prompt)
+    if claude_result:
+        print(f"\n--- Claude ({claude_result['model']}) concise interpretation ---\n")
+        print(claude_result["text"])
+    else:
+        print("(Claude summary skipped or failed.)")
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+Q: Show me example usage of it.
+A:
+1. Explanation
+
+- What the script does (simple): it reads a single-row physiomarkers CSV (default physiomarkers.csv), evaluates many mapped physiologic features (ECG, HRV, ABP, RESP, PPG), and produces:
+  - A detailed text report listing each feature, a simple status (Normal/Borderline/Abnormal/Informational/Missing), and a one-line implication.
+  - A short "report card" grade for key categories (Cardiac/ECG, Hemodynamics, HRV, Respiratory, Peripheral/PPG).
+  - Suggested next steps and an uncertainty/limitations section.
+- Example usages you can run from a shell:
+  - Basic run on default file: python detailed_report.py
+  - Specify a CSV path and save the report to a file: python detailed_report.py --csv path/to/physiomarkers.csv --save report.txt
+  - Produce JSON output: python detailed_report.py --csv path/to/physiomarkers.csv --json --save report.json
+  - Disable optional LLM summarization even if API keys are set: python detailed_report.py --no-llm
+  - Show usage examples (printed by the script): python detailed_report.py --example
+- LLM integration (optional): the script can call OpenAI and Anthropic/Claude models to produce a concise narrative, but only if you set OPENAI_API_KEY and/or ANTHROPIC_API_KEY in the environment and you have the python packages installed. By default the script runs without calling LLMs if keys/packages are missing.
+- Safety note: the output is an interpretation aid (not a diagnosis). Reference ranges are approximate; always correlate with clinical context and raw waveforms.
+
+2. Modified Code
+
+```python
+#!/usr/bin/env python3
+"""
+detailed_report.py
+
+Reads an aggregated physiomarkers CSV (single-row), evaluates mapped features,
+and prints a detailed textual report + category report-card. Optionally saves
+the report and can call OpenAI / Anthropic (Claude) for a concise narrative
+if API keys are configured.
+
+Example command-line usage:
+  python detailed_report.py
+  python detailed_report.py --csv physiomarkers.csv --save report.txt
+  python detailed_report.py --csv physiomarkers.csv --json --save report.json
+  python detailed_report.py --no-llm
+  python detailed_report.py --example
+
+Environment:
+  Set OPENAI_API_KEY and/or ANTHROPIC_API_KEY to enable LLM summarization.
+Dependencies:
+  pip install pandas
+  Optional (for LLMs): pip install openai anthropic
+"""
+import os
+import sys
+import argparse
+import json
+import math
+import time
+import pandas as pd
+
+# Optional LLM clients
+try:
+    import openai
+except Exception:
+    openai = None
+
+try:
+    from anthropic import Anthropic, HUMAN_PROMPT, AI_PROMPT
+except Exception:
+    Anthropic = None
+    HUMAN_PROMPT = ""
+    AI_PROMPT = ""
+
+# Defaults
+DEFAULT_CSV = "physiomarkers.csv"
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
+OPENAI_FALLBACK = "gpt-3.5-turbo"
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-2.1")
+
+# Small mapping of features -> (label, unit)
+FEATURE_MAP = {
+    "ECG_HR_bpm_mean": ("ECG mean heart rate", "bpm"),
+    "ECG_T_rr_ms_mean": ("ECG mean RR interval", "ms"),
+    "ECG_qt_interval_ms_mean": ("QT interval", "ms"),
+    "ECG_qtc_interval_ms_mean": ("Corrected QT (QTc)", "ms"),
+    "ECG_pr_interval_ms_mean": ("PR interval", "ms"),
+    "ECG_QRS_duration_mean": ("QRS duration", "ms"),
+    "HRV_HRV_SDNN": ("HRV SDNN (overall variability)", "ms"),
+    "HRV_HRV_RMSSD": ("HRV RMSSD (short-term vagal)", "ms"),
+    "HRV_HRV_pNN50": ("HRV pNN50 (fraction)", ""),
+    "ABP_SBP_mean": ("Systolic blood pressure (mean)", "mmHg"),
+    "ABP_DBP_mean": ("Diastolic blood pressure (mean)", "mmHg"),
+    "ABP_MAP_mean": ("Mean arterial pressure (mean)", "mmHg"),
+    "ABP_CO_mean": ("Cardiac output (mean)", "L/min"),
+    "ABP_TPR_mean": ("Total peripheral resistance (mean)", "dyn·s/cm^5"),
+    "ABP_ShockIndex_mean": ("Shock index (HR/SBP mean)", "ratio"),
+    "RESP_resp_rate_Bpm_mean": ("Respiratory rate (mean)", "breaths/min"),
+    "PPG_PR_mean": ("PPG pulse rate (mean)", "bpm"),
+    "PPG_pat_ms_mean": ("Pulse arrival time (PAT mean)", "ms"),
+    "PPG_SI_mean": ("PPG Stiffness Index (mean)", "unitless"),
+    "PPG_RI_mean": ("PPG Reflection Index (mean)", "unitless"),
+    "PPG_Augmentation_index_mean": ("PPG Augmentation Index (mean)", "%"),
+}
+
+# Approximate reference ranges (coarse)
+NORMAL_RANGES = {
+    "ECG_HR_bpm_mean": (60, 100, "Adult resting HR; context dependent"),
+    "ECG_T_rr_ms_mean": (600, 1000, "RR in ms ≈ 60-100 bpm"),
+    "ECG_qt_interval_ms_mean": (300, 450, "QT (ms) typical; depends on HR"),
+    "ECG_qtc_interval_ms_mean": (None, 440, "QTc: >440 ms may be prolonged"),
+    "ECG_pr_interval_ms_mean": (120, 200, "PR interval 120–200 ms"),
+    "ECG_QRS_duration_mean": (0, 120, "QRS <120 ms normal"),
+    "HRV_HRV_SDNN": (50, 150, "SDNN approx (context-dependent)"),
+    "HRV_HRV_RMSSD": (20, 50, "RMSSD typical short-term"),
+    "HRV_HRV_pNN50": (0.1, 0.4, "pNN50 fraction (approx)"),
+    "ABP_SBP_mean": (90, 140, "Systolic BP approx normal range"),
+    "ABP_DBP_mean": (60, 90, "Diastolic BP approx normal range"),
+    "ABP_MAP_mean": (65, 110, "MAP for perfusion"),
+    "ABP_CO_mean": (3.0, 7.0, "Cardiac output L/min"),
+    "RESP_resp_rate_Bpm_mean": (12, 20, "Adult resting RR"),
+    "PPG_PR_mean": (60, 100, "Pulse rate should roughly match ECG HR"),
+    "PPG_pat_ms_mean": (180, 400, "Pulse arrival time varies by system"),
+}
+
+CATEGORY_PREFIXES = {
+    "ECG_": "Cardiac / ECG",
+    "HRV_": "Autonomic / HRV",
+    "RESP_": "Respiratory",
+    "ABP_": "Hemodynamics / Blood pressure",
+    "PPG_": "Peripheral / PPG",
+}
+
+def get_category_for_feature(fid):
+    for pfx, name in CATEGORY_PREFIXES.items():
+        if fid.startswith(pfx):
+            return name
+    return "Other"
+
+def evaluate_value(fid, val):
+    if val is None:
+        return "Missing", "No value"
+    try:
+        v = float(val)
+    except Exception:
+        return "Missing", "Non-numeric"
+    if math.isnan(v):
+        return "Missing", "NaN"
+
+    if fid not in NORMAL_RANGES:
+        return "Informational", "No approximate range available"
+
+    low, high, note = NORMAL_RANGES[fid]
+    if low is not None and high is not None:
+        margin_low = low * 0.9 if low != 0 else low - 0.1
+        margin_high = high * 1.1
+        if low <= v <= high:
+            return "Normal", note or ""
+        if margin_low <= v < low or high < v <= margin_high:
+            return "Borderline", f"Near threshold; {note or ''}"
+        return "Abnormal", f"Outside typical range; {note or ''}"
+    elif low is None and high is not None:
+        if v <= high:
+            return "Normal", note or ""
+        if v <= high * 1.1:
+            return "Borderline", f"Near high threshold; {note or ''}"
+        return "Abnormal", f"Above expected; {note or ''}"
+    elif low is not None and high is None:
+        if v >= low:
+            return "Normal", note or ""
+        if v >= low * 0.9:
+            return "Borderline", f"Near low threshold; {note or ''}"
+        return "Abnormal", f"Below expected; {note or ''}"
+    else:
+        return "Informational", "No numeric range defined"
+
+def build_implication(fid, value, status):
+    if value is None or status == "Missing":
+        return "Value not available."
+    try:
+        v = float(value)
+    except Exception:
+        return "Non-numeric value; cannot interpret."
+    if fid == "ECG_HR_bpm_mean":
+        if v < 50:
+            return "Bradycardia range — correlate clinically (symptoms, meds)."
+        if v > 110:
+            return "Tachycardia — consider fever, pain, dehydration, arrhythmia."
+        return "Rate within expected resting range."
+    if fid == "RESP_resp_rate_Bpm_mean":
+        if v < 10:
+            return "Low respiratory rate — evaluate ventilatory status."
+        if v > 24:
+            return "Tachypnea — consider respiratory distress or metabolic cause."
+        return "Respiratory rate within expected resting range."
+    if fid in ("ECG_qt_interval_ms_mean", "ECG_qtc_interval_ms_mean"):
+        if status == "Abnormal":
+            return "Prolonged QT/QTc — consider drugs, electrolytes, clinical context."
+        return "QT interval within referenced range."
+    if fid == "ECG_QRS_duration_mean":
+        if v >= 120:
+            return "Wide QRS — consider conduction delay or bundle branch block."
+        return "QRS duration within expected range."
+    if fid in ("HRV_HRV_SDNN", "HRV_HRV_RMSSD", "HRV_HRV_pNN50"):
+        if status == "Abnormal":
+            return "Low HRV — may indicate reduced autonomic variability."
+        return "HRV metric in expected range for short-term recording."
+    if fid in ("PPG_SI_mean", "PPG_RI_mean", "PPG_Augmentation_index_mean", "PPG_pat_ms_mean"):
+        return "Peripheral waveform index — interpret trend-wise and with device-specific norms."
+    return "Interpret with clinical context."
+
+def build_feature_rows(row):
+    rows = []
+    for fid, (label, unit) in FEATURE_MAP.items():
+        raw = row.get(fid, None)
+        if pd.isna(raw):
+            raw = None
+        status, note = evaluate_value(fid, raw)
+        implication = build_implication(fid, raw, status)
+        rows.append({
+            "feature_id": fid,
+            "label": label,
+            "unit": unit,
+            "value": raw,
+            "status": status,
+            "note": note,
+            "implication": implication,
+            "category": get_category_for_feature(fid),
+        })
+    return rows
+
+def category_summary(rows):
+    by_cat = {}
+    for r in rows:
+        by_cat.setdefault(r["category"], []).append(r)
+    summaries = {}
+    for cat, items in by_cat.items():
+        total = len(items)
+        abnormal = sum(1 for it in items if it["status"] == "Abnormal")
+        borderline = sum(1 for it in items if it["status"] == "Borderline")
+        missing = sum(1 for it in items if it["status"] == "Missing")
+        score = (abnormal + 0.5 * borderline) / total if total > 0 else 0
+        if score == 0:
+            grade = "A"
+        elif score <= 0.2:
+            grade = "B"
+        elif score <= 0.4:
+            grade = "C"
+        elif score <= 0.7:
+            grade = "D"
+        else:
+            grade = "E"
+        summaries[cat] = {
+            "total": total, "abnormal": abnormal, "borderline": borderline,
+            "missing": missing, "score": round(score, 3), "grade": grade
+        }
+    return summaries
+
+def build_report_text(rows, cat_summary):
+    lines = []
+    lines.append("Clinical physiomarkers detailed report\n")
+    lines.append("Note: reference ranges are approximate. This is a single aggregated row; correlate with clinical context and raw waveforms.\n")
+    lines.append("Findings:")
+    for r in rows:
+        val_str = "N/A" if r["value"] is None else f"{r['value']}"
+        unit = f" {r['unit']}" if r['unit'] else ""
+        lines.append(f"- {r['label']} ({r['feature_id']}): {val_str}{unit} — {r['status']}. {r['implication']} ({r['note']})")
+    lines.append("\nReport card (by category):")
+    for cat, s in cat_summary.items():
+        lines.append(f"- {cat}: Grade {s['grade']} (abnormal {s['abnormal']}/{s['total']}, borderline {s['borderline']}, score {s['score']})")
+    lines.append("\nConcise interpretation (auto):")
+    abn = [r for r in rows if r["status"] == "Abnormal"]
+    bdr = [r for r in rows if r["status"] == "Borderline"]
+    if abn:
+        lines.append("- Key abnormal findings:")
+        for t in abn[:4]:
+            lines.append(f"  • {t['label']}: {t['value']} {t['unit']} — {t['implication']}")
+    else:
+        lines.append("- No strongly abnormal values detected in the mapped features.")
+    if bdr:
+        lines.append("- Borderline observations to watch:")
+        for t in bdr[:4]:
+            lines.append(f"  • {t['label']}: {t['value']} {t['unit']} — {t['implication']}")
+    lines.append("\nSuggested next steps (non-urgent):")
+    lines.append("1) Verify abnormal values against raw data and clinical context (ECG strips, waveform, cuff BP).")
+    lines.append("2) Review medications and electrolytes if QT/QTc prolonged or HRV very low.")
+    lines.append("3) Repeat measurement or monitor if hemodynamic instability suspected (MAP, Shock Index).")
+    lines.append("\nUncertainty & limitations: single aggregated row; device-specific indices need population norms. Not a diagnosis.")
+    return "\n".join(lines)
+
+def create_prompt_for_llm(report_text):
+    guidance = (
+        "You are a clinical-style assistant. Using the structured report below, produce a concise interpretation "
+        "in 4-6 short bullets — each: finding, implication, and degree of certainty (low/medium/high). "
+        "Do NOT provide definitive diagnoses. Conclude with 2 recommended non-urgent next steps."
+    )
+    return f"Structured physiomarkers report:\n\n{report_text}\n\n{guidance}"
+
+def call_openai(prompt, model=OPENAI_MODEL, max_tokens=300, temperature=0.2):
+    key = os.getenv("OPENAI_API_KEY")
+    if not key or openai is None:
+        return None
+    openai.api_key = key
+    try:
+        resp = openai.ChatCompletion.create(
+            model=model,
+            messages=[{"role": "system", "content": "You are a concise clinical summarizer."},
+                      {"role": "user", "content": prompt}],
+            max_tokens=max_tokens, temperature=temperature
+        )
+        return {"model": model, "text": resp["choices"][0]["message"]["content"].strip()}
+    except Exception:
+        # fallback
+        try:
+            resp = openai.ChatCompletion.create(
+                model=OPENAI_FALLBACK,
+                messages=[{"role": "system", "content": "You are a concise clinical summarizer."},
+                          {"role": "user", "content": prompt}],
+                max_tokens=max_tokens, temperature=temperature
+            )
+            return {"model": OPENAI_FALLBACK, "text": resp["choices"][0]["message"]["content"].strip()}
+        except Exception:
+            return None
+
+def call_claude(prompt, model=CLAUDE_MODEL, max_tokens=300, temperature=0.2):
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key or Anthropic is None:
+        return None
+    client = Anthropic(api_key=key)
+    try:
+        full_prompt = HUMAN_PROMPT + prompt + AI_PROMPT
+        resp = client.completions.create(model=model, prompt=full_prompt, max_tokens_to_sample=max_tokens, temperature=temperature)
+        return {"model": model, "text": resp["completion"].strip()}
+    except Exception:
+        return None
+
+def save_report(report_text, path, json_mode=False, metadata=None):
+    if json_mode:
+        out = {"report": report_text}
+        if metadata:
+            out["metadata"] = metadata
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=2)
+    else:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report_text)
+
+def load_csv_first_row(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"CSV file not found: {path}")
+    df = pd.read_csv(path)
+    if df.shape[0] < 1:
+        raise ValueError("CSV appears empty")
+    return df.iloc[0].to_dict()
+
+def run_report(csv_path, call_llm=True, save_path=None, json_mode=False, print_output=True):
+    row = load_csv_first_row(csv_path)
+    rows = build_feature_rows(row)
+    cat_summary = category_summary(rows)
+    report_text = build_report_text(rows, cat_summary)
+
+    if print_output:
+        print("\n" + "="*80)
+        print("DETAILED PHYSIOMARKERS REPORT")
+        print("="*80 + "\n")
+        print(report_text)
+        print("\n" + "="*80 + "\n")
+
+    metadata = {"csv": os.path.abspath(csv_path), "generated_by": "detailed_report.py"}
+
+    if save_path:
+        save_report(report_text, save_path, json_mode=json_mode, metadata=metadata)
+        if print_output:
+            print(f"Report saved to: {save_path}")
+
+    # Optional LLM summary
+    llm_outputs = {}
+    if call_llm:
+        prompt = create_prompt_for_llm(report_text)
+        if openai is not None and os.getenv("OPENAI_API_KEY"):
+            if print_output:
+                print("Calling OpenAI for concise interpretation...")
+            res = call_openai(prompt)
+            if res:
+                llm_outputs["openai"] = res
+                if print_output:
+                    print(f"\n--- OpenAI ({res['model']}) concise interpretation ---\n")
+                    print(res["text"])
+        if Anthropic is not None and os.getenv("ANTHROPIC_API_KEY"):
+            if print_output:
+                print("\nCalling Anthropic/Claude for concise interpretation...")
+            res = call_claude(prompt)
+            if res:
+                llm_outputs["claude"] = res
+                if print_output:
+                    print(f"\n--- Claude ({res['model']}) concise interpretation ---\n")
+                    print(res["text"])
+    return {"report": report_text, "category_summary": cat_summary, "llm": llm_outputs}
+
+def print_example_usage():
+    examples = [
+        "python detailed_report.py",
+        "python detailed_report.py --csv physiomarkers.csv --save report.txt",
+        "python detailed_report.py --csv physiomarkers.csv --json --save report.json",
+        "python detailed_report.py --no-llm",
+        "export OPENAI_API_KEY='sk-...'  # then run to enable OpenAI summarization"
+    ]
+    print("Example commands:")
+    for e in examples:
+        print("  " + e)
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Generate a detailed physiomarkers report from a CSV (single aggregated row).")
+    parser.add_argument("--csv", "-c", default=DEFAULT_CSV, help="Path to physiomarkers CSV (single aggregated row).")
+    parser.add_argument("--no-llm", action="store_true", help="Do not call LLMs, even if API keys are present.")
+    parser.add_argument("--save", "-s", help="Save report to file (path). Use --json to save JSON with metadata.")
+    parser.add_argument("--json", action="store_true", help="When used with --save, save as JSON (report+metadata).")
+    parser.add_argument("--example", action="store_true", help="Print example usage and exit.")
+    parser.add_argument("--quiet", action="store_true", help="Do not print report to stdout (useful when saving only).")
+    args = parser.parse_args(argv)
+
+    if args.example:
+        print_example_usage()
+        return 0
+
+    try:
+        result = run_report(csv_path=args.csv, call_llm=(not args.no_llm), save_path=args.save, json_mode=args.json, print_output=(not args.quiet))
+        return 0
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+---
+
+Q: I want to use openai's/claude's popular models (like: gpt-4o-mini model) with api key call. How can I input these model/api-key information?
+A:
+1. Explanation
+
+- What the code does now (simple): It reads the physiomarkers CSV (single aggregated row), evaluates mapped physiologic features and creates a detailed report plus an optional concise LLM summary.
+- What changed for model/key input: you can now provide OpenAI and Anthropic (Claude) API keys and model names either via environment variables (recommended) or via command-line flags (--openai-key, --openai-model, --claude-key, --claude-model). The script uses those values when calling the LLMs, so you can request popular models like "gpt-4o-mini" (or any model string you have access to) and choose the Claude model you prefer.
+- Security note: prefer setting API keys through environment variables (OPENAI_API_KEY, ANTHROPIC_API_KEY). Passing keys on the command line is supported for convenience but is less secure (visible to other users/process lists).
+
+2. Modified Code
+
+```python
+#!/usr/bin/env python3
+"""
+detailed_report_with_model_options.py
+
+Same detailed physiomarkers report as before, with added CLI options to specify:
+  --openai-key and --openai-model
+  --claude-key  and --claude-model
+
+Keys may also be provided via environment variables:
+  OPENAI_API_KEY, ANTHROPIC_API_KEY
+
+Example:
+  export OPENAI_API_KEY="sk-..."
+  python detailed_report_with_model_options.py --openai-model gpt-4o-mini
+
+Or (less secure) pass key on CLI:
+  python detailed_report_with_model_options.py --openai-key sk-... --openai-model gpt-4o-mini
+"""
+import os
+import sys
+import argparse
+import json
+import math
+import time
+import pandas as pd
+
+# Optional LLM clients (may not be installed)
+try:
+    import openai
+except Exception:
+    openai = None
+
+try:
+    from anthropic import Anthropic, HUMAN_PROMPT, AI_PROMPT
+except Exception:
+    Anthropic = None
+    HUMAN_PROMPT = ""
+    AI_PROMPT = ""
+
+# Defaults (can be overridden by env or CLI)
+DEFAULT_CSV = "physiomarkers.csv"
+DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
+DEFAULT_OPENAI_FALLBACK = "gpt-3.5-turbo"
+DEFAULT_CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-2.1")
+
+# (Feature map, ranges, and processing functions are identical to earlier version)
+FEATURE_MAP = {
+    "ECG_HR_bpm_mean": ("ECG mean heart rate", "bpm"),
+    "ECG_T_rr_ms_mean": ("ECG mean RR interval", "ms"),
+    "ECG_qt_interval_ms_mean": ("QT interval", "ms"),
+    "ECG_qtc_interval_ms_mean": ("Corrected QT (QTc)", "ms"),
+    "ECG_pr_interval_ms_mean": ("PR interval", "ms"),
+    "ECG_QRS_duration_mean": ("QRS duration", "ms"),
+    "HRV_HRV_SDNN": ("HRV SDNN (overall variability)", "ms"),
+    "HRV_HRV_RMSSD": ("HRV RMSSD (short-term vagal)", "ms"),
+    "HRV_HRV_pNN50": ("HRV pNN50 (fraction)", ""),
+    "ABP_SBP_mean": ("Systolic blood pressure (mean)", "mmHg"),
+    "ABP_DBP_mean": ("Diastolic blood pressure (mean)", "mmHg"),
+    "ABP_MAP_mean": ("Mean arterial pressure (mean)", "mmHg"),
+    "ABP_CO_mean": ("Cardiac output (mean)", "L/min"),
+    "ABP_TPR_mean": ("Total peripheral resistance (mean)", "dyn·s/cm^5"),
+    "ABP_ShockIndex_mean": ("Shock index (HR/SBP mean)", "ratio"),
+    "RESP_resp_rate_Bpm_mean": ("Respiratory rate (mean)", "breaths/min"),
+    "PPG_PR_mean": ("PPG pulse rate (mean)", "bpm"),
+    "PPG_pat_ms_mean": ("Pulse arrival time (PAT mean)", "ms"),
+    "PPG_SI_mean": ("PPG Stiffness Index (mean)", "unitless"),
+    "PPG_RI_mean": ("PPG Reflection Index (mean)", "unitless"),
+    "PPG_Augmentation_index_mean": ("PPG Augmentation Index (mean)", "%"),
+}
+
+NORMAL_RANGES = {
+    "ECG_HR_bpm_mean": (60, 100, "Adult resting HR; context dependent"),
+    "ECG_T_rr_ms_mean": (600, 1000, "RR in ms ≈ 60-100 bpm"),
+    "ECG_qt_interval_ms_mean": (300, 450, "QT (ms) typical; depends on HR"),
+    "ECG_qtc_interval_ms_mean": (None, 440, "QTc: >440 ms may be prolonged"),
+    "ECG_pr_interval_ms_mean": (120, 200, "PR interval 120–200 ms"),
+    "ECG_QRS_duration_mean": (0, 120, "QRS <120 ms normal"),
+    "HRV_HRV_SDNN": (50, 150, "SDNN approx (context-dependent)"),
+    "HRV_HRV_RMSSD": (20, 50, "RMSSD typical short-term"),
+    "HRV_HRV_pNN50": (0.1, 0.4, "pNN50 fraction (approx)"),
+    "ABP_SBP_mean": (90, 140, "Systolic BP approx normal range"),
+    "ABP_DBP_mean": (60, 90, "Diastolic BP approx normal range"),
+    "ABP_MAP_mean": (65, 110, "MAP for perfusion"),
+    "ABP_CO_mean": (3.0, 7.0, "Cardiac output L/min"),
+    "RESP_resp_rate_Bpm_mean": (12, 20, "Adult resting RR"),
+    "PPG_PR_mean": (60, 100, "Pulse rate should roughly match ECG HR"),
+    "PPG_pat_ms_mean": (180, 400, "Pulse arrival time varies by system"),
+}
+
+CATEGORY_PREFIXES = {
+    "ECG_": "Cardiac / ECG",
+    "HRV_": "Autonomic / HRV",
+    "RESP_": "Respiratory",
+    "ABP_": "Hemodynamics / Blood pressure",
+    "PPG_": "Peripheral / PPG",
+}
+
+def get_category_for_feature(fid):
+    for pfx, name in CATEGORY_PREFIXES.items():
+        if fid.startswith(pfx):
+            return name
+    return "Other"
+
+def evaluate_value(fid, val):
+    if val is None:
+        return "Missing", "No value"
+    try:
+        v = float(val)
+    except Exception:
+        return "Missing", "Non-numeric"
+    if math.isnan(v):
+        return "Missing", "NaN"
+
+    if fid not in NORMAL_RANGES:
+        return "Informational", "No approximate range available"
+
+    low, high, note = NORMAL_RANGES[fid]
+    if low is not None and high is not None:
+        margin_low = low * 0.9 if low != 0 else low - 0.1
+        margin_high = high * 1.1
+        if low <= v <= high:
+            return "Normal", note or ""
+        if margin_low <= v < low or high < v <= margin_high:
+            return "Borderline", f"Near threshold; {note or ''}"
+        return "Abnormal", f"Outside typical range; {note or ''}"
+    elif low is None and high is not None:
+        if v <= high:
+            return "Normal", note or ""
+        if v <= high * 1.1:
+            return "Borderline", f"Near high threshold; {note or ''}"
+        return "Abnormal", f"Above expected; {note or ''}"
+    elif low is not None and high is None:
+        if v >= low:
+            return "Normal", note or ""
+        if v >= low * 0.9:
+            return "Borderline", f"Near low threshold; {note or ''}"
+        return "Abnormal", f"Below expected; {note or ''}"
+    else:
+        return "Informational", "No numeric range defined"
+
+def build_implication(fid, value, status):
+    if value is None or status == "Missing":
+        return "Value not available."
+    try:
+        v = float(value)
+    except Exception:
+        return "Non-numeric value; cannot interpret."
+    if fid == "ECG_HR_bpm_mean":
+        if v < 50:
+            return "Bradycardia range — correlate clinically (symptoms, meds)."
+        if v > 110:
+            return "Tachycardia — consider fever, pain, dehydration, arrhythmia."
+        return "Rate within expected resting range."
+    if fid == "RESP_resp_rate_Bpm_mean":
+        if v < 10:
+            return "Low respiratory rate — evaluate ventilatory status."
+        if v > 24:
+            return "Tachypnea — consider respiratory distress or metabolic cause."
+        return "Respiratory rate within expected resting range."
+    if fid in ("ECG_qt_interval_ms_mean", "ECG_qtc_interval_ms_mean"):
+        if status == "Abnormal":
+            return "Prolonged QT/QTc — consider drugs, electrolytes, clinical context."
+        return "QT interval within referenced range."
+    if fid == "ECG_QRS_duration_mean":
+        if v >= 120:
+            return "Wide QRS — consider conduction delay or bundle branch block."
+        return "QRS duration within expected range."
+    if fid in ("HRV_HRV_SDNN", "HRV_HRV_RMSSD", "HRV_HRV_pNN50"):
+        if status == "Abnormal":
+            return "Low HRV — may indicate reduced autonomic variability."
+        return "HRV metric in expected range for short-term recording."
+    if fid in ("PPG_SI_mean", "PPG_RI_mean", "PPG_Augmentation_index_mean", "PPG_pat_ms_mean"):
+        return "Peripheral waveform index — interpret trend-wise and with device-specific norms."
+    return "Interpret with clinical context."
+
+def build_feature_rows(row):
+    rows = []
+    for fid, (label, unit) in FEATURE_MAP.items():
+        raw = row.get(fid, None)
+        if pd.isna(raw):
+            raw = None
+        status, note = evaluate_value(fid, raw)
+        implication = build_implication(fid, raw, status)
+        rows.append({
+            "feature_id": fid,
+            "label": label,
+            "unit": unit,
+            "value": raw,
+            "status": status,
+            "note": note,
+            "implication": implication,
+            "category": get_category_for_feature(fid),
+        })
+    return rows
+
+def category_summary(rows):
+    by_cat = {}
+    for r in rows:
+        by_cat.setdefault(r["category"], []).append(r)
+    summaries = {}
+    for cat, items in by_cat.items():
+        total = len(items)
+        abnormal = sum(1 for it in items if it["status"] == "Abnormal")
+        borderline = sum(1 for it in items if it["status"] == "Borderline")
+        missing = sum(1 for it in items if it["status"] == "Missing")
+        score = (abnormal + 0.5 * borderline) / total if total > 0 else 0
+        if score == 0:
+            grade = "A"
+        elif score <= 0.2:
+            grade = "B"
+        elif score <= 0.4:
+            grade = "C"
+        elif score <= 0.7:
+            grade = "D"
+        else:
+            grade = "E"
+        summaries[cat] = {
+            "total": total, "abnormal": abnormal, "borderline": borderline,
+            "missing": missing, "score": round(score, 3), "grade": grade
+        }
+    return summaries
+
+def build_report_text(rows, cat_summary):
+    lines = []
+    lines.append("Clinical physiomarkers detailed report\n")
+    lines.append("Note: reference ranges are approximate. This is a single aggregated row; correlate with clinical context and raw waveforms.\n")
+    lines.append("Findings:")
+    for r in rows:
+        val_str = "N/A" if r["value"] is None else f"{r['value']}"
+        unit = f" {r['unit']}" if r['unit'] else ""
+        lines.append(f"- {r['label']} ({r['feature_id']}): {val_str}{unit} — {r['status']}. {r['implication']} ({r['note']})")
+    lines.append("\nReport card (by category):")
+    for cat, s in cat_summary.items():
+        lines.append(f"- {cat}: Grade {s['grade']} (abnormal {s['abnormal']}/{s['total']}, borderline {s['borderline']}, score {s['score']})")
+    lines.append("\nConcise interpretation (auto):")
+    abn = [r for r in rows if r["status"] == "Abnormal"]
+    bdr = [r for r in rows if r["status"] == "Borderline"]
+    if abn:
+        lines.append("- Key abnormal findings:")
+        for t in abn[:4]:
+            lines.append(f"  • {t['label']}: {t['value']} {t['unit']} — {t['implication']}")
+    else:
+        lines.append("- No strongly abnormal values detected in the mapped features.")
+    if bdr:
+        lines.append("- Borderline observations to watch:")
+        for t in bdr[:4]:
+            lines.append(f"  • {t['label']}: {t['value']} {t['unit']} — {t['implication']}")
+    lines.append("\nSuggested next steps (non-urgent):")
+    lines.append("1) Verify abnormal values against raw data and clinical context (ECG strips, waveform, cuff BP).")
+    lines.append("2) Review medications and electrolytes if QT/QTc prolonged or HRV very low.")
+    lines.append("3) Repeat measurement or monitor if hemodynamic instability suspected (MAP, Shock Index).")
+    lines.append("\nUncertainty & limitations: single aggregated row; device-specific indices need population norms. Not a diagnosis.")
+    return "\n".join(lines)
+
+def create_prompt_for_llm(report_text):
+    guidance = (
+        "You are a clinical-style assistant. Using the structured report below, produce a concise interpretation "
+        "in 4-6 short bullets — each: finding, implication, and degree of certainty (low/medium/high). "
+        "Do NOT provide definitive diagnoses. Conclude with 2 recommended non-urgent next steps."
+    )
+    return f"Structured physiomarkers report:\n\n{report_text}\n\n{guidance}"
+
+# Updated wrappers: accept api_key and model as parameters (do not rely only on env)
+def call_openai(prompt, api_key=None, model=None, max_tokens=300, temperature=0.2):
+    model = model or DEFAULT_OPENAI_MODEL
+    # if user omitted api_key, try env
+    api_key = api_key or os.getenv("OPENAI_API_KEY")
+    if not api_key or openai is None:
+        return None
+    # set client key
+    openai.api_key = api_key
+    try:
+        resp = openai.ChatCompletion.create(
+            model=model,
+            messages=[{"role": "system", "content": "You are a concise clinical summarizer."},
+                      {"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        text = resp["choices"][0]["message"]["content"].strip()
+        return {"provider": "openai", "model": model, "text": text}
+    except Exception as e:
+        # try fallback model if available
+        try:
+            resp = openai.ChatCompletion.create(
+                model=DEFAULT_OPENAI_FALLBACK,
+                messages=[{"role": "system", "content": "You are a concise clinical summarizer."},
+                          {"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            text = resp["choices"][0]["message"]["content"].strip()
+            return {"provider": "openai", "model": DEFAULT_OPENAI_FALLBACK, "text": text}
+        except Exception:
+            return {"provider": "openai", "error": str(e)}
+
+def call_claude(prompt, api_key=None, model=None, max_tokens=300, temperature=0.2):
+    model = model or DEFAULT_CLAUDE_MODEL
+    api_key = api_key or os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY")
+    if not api_key or Anthropic is None:
+        return None
+    client = Anthropic(api_key=api_key)
+    try:
+        full_prompt = HUMAN_PROMPT + prompt + AI_PROMPT
+        resp = client.completions.create(
+            model=model,
+            prompt=full_prompt,
+            max_tokens_to_sample=max_tokens,
+            temperature=temperature,
+        )
+        text = resp["completion"].strip()
+        return {"provider": "claude", "model": model, "text": text}
+    except Exception as e:
+        return {"provider": "claude", "error": str(e)}
+
+def load_csv_first_row(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"CSV file not found: {path}")
+    df = pd.read_csv(path)
+    if df.shape[0] < 1:
+        raise ValueError("CSV appears empty")
+    return df.iloc[0].to_dict()
+
+def run_report(csv_path, call_llm=True, openai_key=None, openai_model=None, claude_key=None, claude_model=None, save_path=None, json_mode=False, print_output=True):
+    row = load_csv_first_row(csv_path)
+    rows = build_feature_rows(row)
+    cat_summary = category_summary(rows)
+    report_text = build_report_text(rows, cat_summary)
+
+    if print_output:
+        print("\n" + "="*80)
+        print("DETAILED PHYSIOMARKERS REPORT")
+        print("="*80 + "\n")
+        print(report_text)
+        print("\n" + "="*80 + "\n")
+
+    if save_path:
+        if json_mode:
+            out = {"report": report_text, "summary": cat_summary}
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(out, f, indent=2)
+        else:
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(report_text)
+        if print_output:
+            print(f"Report saved to: {save_path}")
+
+    llm_outputs = {}
+    if call_llm:
+        prompt = create_prompt_for_llm(report_text)
+        # OpenAI (if key available either from arg or env)
+        if (openai_key or os.getenv("OPENAI_API_KEY")) and openai is not None:
+            if print_output:
+                print("Calling OpenAI...")
+            res = call_openai(prompt, api_key=openai_key, model=openai_model)
+            if res:
+                llm_outputs["openai"] = res
+                if print_output:
+                    if "text" in res:
+                        print(f"\n--- OpenAI ({res.get('model')}) concise interpretation ---\n{res['text']}\n")
+                    else:
+                        print(f"(OpenAI error: {res.get('error')})\n")
+        else:
+            if print_output:
+                print("(OpenAI call skipped: API key or openai package missing.)")
+        time.sleep(0.6)
+        # Claude/Anthropic
+        if (claude_key or os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY")) and Anthropic is not None:
+            if print_output:
+                print("Calling Anthropic/Claude...")
+            res = call_claude(prompt, api_key=claude_key, model=claude_model)
+            if res:
+                llm_outputs["claude"] = res
+                if print_output:
+                    if "text" in res:
+                        print(f"\n--- Claude ({res.get('model')}) concise interpretation ---\n{res['text']}\n")
+                    else:
+                        print(f"(Claude error: {res.get('error')})\n")
+        else:
+            if print_output:
+                print("(Claude call skipped: API key or anthropic package missing.)")
+    return {"report": report_text, "category_summary": cat_summary, "llm": llm_outputs}
+
+def print_example_usage():
+    examples = [
+        "python detailed_report_with_model_options.py",
+        "python detailed_report_with_model_options.py --csv physiomarkers.csv --save report.txt",
+        "export OPENAI_API_KEY='sk-...' && python detailed_report_with_model_options.py --openai-model gpt-4o-mini",
+        "python detailed_report_with_model_options.py --openai-key sk-... --openai-model gpt-4o-mini",
+        "python detailed_report_with_model_options.py --no-llm",
+    ]
+    print("Example commands:")
+    for e in examples:
+        print("  " + e)
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Generate a detailed physiomarkers report (single-row CSV).")
+    parser.add_argument("--csv", "-c", default=DEFAULT_CSV, help="Path to physiomarkers CSV (single aggregated row).")
+    parser.add_argument("--no-llm", action="store_true", help="Do not call LLMs, even if API keys are present.")
+    parser.add_argument("--save", "-s", help="Save report to file (path). Use --json to save JSON.")
+    parser.add_argument("--json", action="store_true", help="When used with --save, save as JSON (report+metadata).")
+    parser.add_argument("--example", action="store_true", help="Print example usage and exit.")
+    parser.add_argument("--quiet", action="store_true", help="Do not print report to stdout.")
+    # New options for keys and models
+    parser.add_argument("--openai-key", help="OpenAI API key (optional; prefer OPENAI_API_KEY env var).")
+    parser.add_argument("--openai-model", default=DEFAULT_OPENAI_MODEL, help="OpenAI model to use (e.g., gpt-4o-mini).")
+    parser.add_argument("--claude-key", help="Anthropic/Claude API key (optional; prefer ANTHROPIC_API_KEY env var).")
+    parser.add_argument("--claude-model", default=DEFAULT_CLAUDE_MODEL, help="Claude model to use (e.g., claude-2.1).")
+    args = parser.parse_args(argv)
+
+    if args.example:
+        print_example_usage()
+        return 0
+
+    # Warn about CLI-in-proc key usage
+    if args.openai_key or args.claude_key:
+        print("Warning: passing API keys on the command line can be visible to other processes/users. Consider using environment variables instead.")
+
+    try:
+        result = run_report(
+            csv_path=args.csv,
+            call_llm=(not args.no_llm),
+            openai_key=args.openai_key,
+            openai_model=args.openai_model,
+            claude_key=args.claude_key,
+            claude_model=args.claude_model,
+            save_path=args.save,
+            json_mode=args.json,
+            print_output=(not args.quiet)
+        )
+        return 0
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+---
+
+Q: Got an error while executing gpt-4o-mini model under openai api calling. Please modify the code.
+A:
+1. Explanation
+
+- What this change does: it updates the OpenAI call to use the newer openai-python (>=1.0.0) client interface when available (openai.OpenAI), while still falling back to the older ChatCompletion path if an older library is installed. This avoids the "You tried to access openai.ChatCompletion, but this is no longer supported in openai>=1.0.0" error when calling modern models such as gpt-4o-mini.
+- How it works: call_openai() now detects the installed openai package version by checking for the OpenAI class. If present, it constructs an openai.OpenAI client and calls client.chat.completions.create(...). If the older ChatCompletion interface exists (older openai versions), it falls back to openai.ChatCompletion.create(...) for compatibility.
+- Usage: you can pass --openai-model gpt-4o-mini and supply your key via environment OPENAI_API_KEY or via --openai-key. The script prints helpful messages if the package or keys are missing. This keeps existing CLI options unchanged while fixing the API mismatch.
+
+2. Modified Code (only the code block)
+
+```python
+#!/usr/bin/env python3
+"""
+detailed_report_with_model_options.py
+
+Same detailed physiomarkers report as before, with added CLI options to specify:
+  --openai-key and --openai-model
+  --claude-key  and --claude-model
+
+Keys may also be provided via environment variables:
+  OPENAI_API_KEY, ANTHROPIC_API_KEY
+
+Example:
+  export OPENAI_API_KEY="sk-..."
+  python detailed_report_with_model_options.py --openai-model gpt-4o-mini
+
+Or (less secure) pass key on CLI:
+  python detailed_report_with_model_options.py --openai-key sk-... --openai-model gpt-4o-mini
+"""
+import os
+import sys
+import argparse
+import json
+import math
+import time
+import pandas as pd
+
+# Optional LLM clients (may not be installed)
+try:
+    import openai
+except Exception:
+    openai = None
+
+try:
+    from anthropic import Anthropic, HUMAN_PROMPT, AI_PROMPT
+except Exception:
+    Anthropic = None
+    HUMAN_PROMPT = ""
+    AI_PROMPT = ""
+
+# Defaults (can be overridden by env or CLI)
+DEFAULT_CSV = "physiomarkers.csv"
+DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
+DEFAULT_OPENAI_FALLBACK = "gpt-3.5-turbo"
+DEFAULT_CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-2.1")
+
+# (Feature map, ranges, and processing functions are identical to earlier version)
+FEATURE_MAP = {
+    "ECG_HR_bpm_mean": ("ECG mean heart rate", "bpm"),
+    "ECG_T_rr_ms_mean": ("ECG mean RR interval", "ms"),
+    "ECG_qt_interval_ms_mean": ("QT interval", "ms"),
+    "ECG_qtc_interval_ms_mean": ("Corrected QT (QTc)", "ms"),
+    "ECG_pr_interval_ms_mean": ("PR interval", "ms"),
+    "ECG_QRS_duration_mean": ("QRS duration", "ms"),
+    "HRV_HRV_SDNN": ("HRV SDNN (overall variability)", "ms"),
+    "HRV_HRV_RMSSD": ("HRV RMSSD (short-term vagal)", "ms"),
+    "HRV_HRV_pNN50": ("HRV pNN50 (fraction)", ""),
+    "ABP_SBP_mean": ("Systolic blood pressure (mean)", "mmHg"),
+    "ABP_DBP_mean": ("Diastolic blood pressure (mean)", "mmHg"),
+    "ABP_MAP_mean": ("Mean arterial pressure (mean)", "mmHg"),
+    "ABP_CO_mean": ("Cardiac output (mean)", "L/min"),
+    "ABP_TPR_mean": ("Total peripheral resistance (mean)", "dyn·s/cm^5"),
+    "ABP_ShockIndex_mean": ("Shock index (HR/SBP mean)", "ratio"),
+    "RESP_resp_rate_Bpm_mean": ("Respiratory rate (mean)", "breaths/min"),
+    "PPG_PR_mean": ("PPG pulse rate (mean)", "bpm"),
+    "PPG_pat_ms_mean": ("Pulse arrival time (PAT mean)", "ms"),
+    "PPG_SI_mean": ("PPG Stiffness Index (mean)", "unitless"),
+    "PPG_RI_mean": ("PPG Reflection Index (mean)", "unitless"),
+    "PPG_Augmentation_index_mean": ("PPG Augmentation Index (mean)", "%"),
+}
+
+NORMAL_RANGES = {
+    "ECG_HR_bpm_mean": (60, 100, "Adult resting HR; context dependent"),
+    "ECG_T_rr_ms_mean": (600, 1000, "RR in ms ≈ 60-100 bpm"),
+    "ECG_qt_interval_ms_mean": (300, 450, "QT (ms) typical; depends on HR"),
+    "ECG_qtc_interval_ms_mean": (None, 440, "QTc: >440 ms may be prolonged"),
+    "ECG_pr_interval_ms_mean": (120, 200, "PR interval 120–200 ms"),
+    "ECG_QRS_duration_mean": (0, 120, "QRS <120 ms normal"),
+    "HRV_HRV_SDNN": (50, 150, "SDNN approx (context-dependent)"),
+    "HRV_HRV_RMSSD": (20, 50, "RMSSD typical short-term"),
+    "HRV_HRV_pNN50": (0.1, 0.4, "pNN50 fraction (approx)"),
+    "ABP_SBP_mean": (90, 140, "Systolic BP approx normal range"),
+    "ABP_DBP_mean": (60, 90, "Diastolic BP approx normal range"),
+    "ABP_MAP_mean": (65, 110, "MAP for perfusion"),
+    "ABP_CO_mean": (3.0, 7.0, "Cardiac output L/min"),
+    "RESP_resp_rate_Bpm_mean": (12, 20, "Adult resting RR"),
+    "PPG_PR_mean": (60, 100, "Pulse rate should roughly match ECG HR"),
+    "PPG_pat_ms_mean": (180, 400, "Pulse arrival time varies by system"),
+}
+
+CATEGORY_PREFIXES = {
+    "ECG_": "Cardiac / ECG",
+    "HRV_": "Autonomic / HRV",
+    "RESP_": "Respiratory",
+    "ABP_": "Hemodynamics / Blood pressure",
+    "PPG_": "Peripheral / PPG",
+}
+
+def get_category_for_feature(fid):
+    for pfx, name in CATEGORY_PREFIXES.items():
+        if fid.startswith(pfx):
+            return name
+    return "Other"
+
+def evaluate_value(fid, val):
+    if val is None:
+        return "Missing", "No value"
+    try:
+        v = float(val)
+    except Exception:
+        return "Missing", "Non-numeric"
+    if math.isnan(v):
+        return "Missing", "NaN"
+
+    if fid not in NORMAL_RANGES:
+        return "Informational", "No approximate range available"
+
+    low, high, note = NORMAL_RANGES[fid]
+    if low is not None and high is not None:
+        margin_low = low * 0.9 if low != 0 else low - 0.1
+        margin_high = high * 1.1
+        if low <= v <= high:
+            return "Normal", note or ""
+        if margin_low <= v < low or high < v <= margin_high:
+            return "Borderline", f"Near threshold; {note or ''}"
+        return "Abnormal", f"Outside typical range; {note or ''}"
+    elif low is None and high is not None:
+        if v <= high:
+            return "Normal", note or ""
+        if v <= high * 1.1:
+            return "Borderline", f"Near high threshold; {note or ''}"
+        return "Abnormal", f"Above expected; {note or ''}"
+    elif low is not None and high is None:
+        if v >= low:
+            return "Normal", note or ""
+        if v >= low * 0.9:
+            return "Borderline", f"Near low threshold; {note or ''}"
+        return "Abnormal", f"Below expected; {note or ''}"
+    else:
+        return "Informational", "No numeric range defined"
+
+def build_implication(fid, value, status):
+    if value is None or status == "Missing":
+        return "Value not available."
+    try:
+        v = float(value)
+    except Exception:
+        return "Non-numeric value; cannot interpret."
+    if fid == "ECG_HR_bpm_mean":
+        if v < 50:
+            return "Bradycardia range — correlate clinically (symptoms, meds)."
+        if v > 110:
+            return "Tachycardia — consider fever, pain, dehydration, arrhythmia."
+        return "Rate within expected resting range."
+    if fid == "RESP_resp_rate_Bpm_mean":
+        if v < 10:
+            return "Low respiratory rate — evaluate ventilatory status."
+        if v > 24:
+            return "Tachypnea — consider respiratory distress or metabolic cause."
+        return "Respiratory rate within expected resting range."
+    if fid in ("ECG_qt_interval_ms_mean", "ECG_qtc_interval_ms_mean"):
+        if status == "Abnormal":
+            return "Prolonged QT/QTc — consider drugs, electrolytes, clinical context."
+        return "QT interval within referenced range."
+    if fid == "ECG_QRS_duration_mean":
+        if v >= 120:
+            return "Wide QRS — consider conduction delay or bundle branch block."
+        return "QRS duration within expected range."
+    if fid in ("HRV_HRV_SDNN", "HRV_HRV_RMSSD", "HRV_HRV_pNN50"):
+        if status == "Abnormal":
+            return "Low HRV — may indicate reduced autonomic variability."
+        return "HRV metric in expected range for short-term recording."
+    if fid in ("PPG_SI_mean", "PPG_RI_mean", "PPG_Augmentation_index_mean", "PPG_pat_ms_mean"):
+        return "Peripheral waveform index — interpret trend-wise and with device-specific norms."
+    return "Interpret with clinical context."
+
+def build_feature_rows(row):
+    rows = []
+    for fid, (label, unit) in FEATURE_MAP.items():
+        raw = row.get(fid, None)
+        if pd.isna(raw):
+            raw = None
+        status, note = evaluate_value(fid, raw)
+        implication = build_implication(fid, raw, status)
+        rows.append({
+            "feature_id": fid,
+            "label": label,
+            "unit": unit,
+            "value": raw,
+            "status": status,
+            "note": note,
+            "implication": implication,
+            "category": get_category_for_feature(fid),
+        })
+    return rows
+
+def category_summary(rows):
+    by_cat = {}
+    for r in rows:
+        by_cat.setdefault(r["category"], []).append(r)
+    summaries = {}
+    for cat, items in by_cat.items():
+        total = len(items)
+        abnormal = sum(1 for it in items if it["status"] == "Abnormal")
+        borderline = sum(1 for it in items if it["status"] == "Borderline")
+        missing = sum(1 for it in items if it["status"] == "Missing")
+        score = (abnormal + 0.5 * borderline) / total if total > 0 else 0
+        if score == 0:
+            grade = "A"
+        elif score <= 0.2:
+            grade = "B"
+        elif score <= 0.4:
+            grade = "C"
+        elif score <= 0.7:
+            grade = "D"
+        else:
+            grade = "E"
+        summaries[cat] = {
+            "total": total, "abnormal": abnormal, "borderline": borderline,
+            "missing": missing, "score": round(score, 3), "grade": grade
+        }
+    return summaries
+
+def build_report_text(rows, cat_summary):
+    lines = []
+    lines.append("Clinical physiomarkers detailed report\n")
+    lines.append("Note: reference ranges are approximate. This is a single aggregated row; correlate with clinical context and raw waveforms.\n")
+    lines.append("Findings:")
+    for r in rows:
+        val_str = "N/A" if r["value"] is None else f"{r['value']}"
+        unit = f" {r['unit']}" if r['unit'] else ""
+        lines.append(f"- {r['label']} ({r['feature_id']}): {val_str}{unit} — {r['status']}. {r['implication']} ({r['note']})")
+    lines.append("\nReport card (by category):")
+    for cat, s in cat_summary.items():
+        lines.append(f"- {cat}: Grade {s['grade']} (abnormal {s['abnormal']}/{s['total']}, borderline {s['borderline']}, score {s['score']})")
+    lines.append("\nConcise interpretation (auto):")
+    abn = [r for r in rows if r["status"] == "Abnormal"]
+    bdr = [r for r in rows if r["status"] == "Borderline"]
+    if abn:
+        lines.append("- Key abnormal findings:")
+        for t in abn[:4]:
+            lines.append(f"  • {t['label']}: {t['value']} {t['unit']} — {t['implication']}")
+    else:
+        lines.append("- No strongly abnormal values detected in the mapped features.")
+    if bdr:
+        lines.append("- Borderline observations to watch:")
+        for t in bdr[:4]:
+            lines.append(f"  • {t['label']}: {t['value']} {t['unit']} — {t['implication']}")
+    lines.append("\nSuggested next steps (non-urgent):")
+    lines.append("1) Verify abnormal values against raw data and clinical context (ECG strips, waveform, cuff BP).")
+    lines.append("2) Review medications and electrolytes if QT/QTc prolonged or HRV very low.")
+    lines.append("3) Repeat measurement or monitor if hemodynamic instability suspected (MAP, Shock Index).")
+    lines.append("\nUncertainty & limitations: single aggregated row; device-specific indices need population norms. Not a diagnosis.")
+    return "\n".join(lines)
+
+def create_prompt_for_llm(report_text):
+    guidance = (
+        "You are a clinical-style assistant. Using the structured report below, produce a concise interpretation "
+        "in 4-6 short bullets — each: finding, implication, and degree of certainty (low/medium/high). "
+        "Do NOT provide definitive diagnoses. Conclude with 2 recommended non-urgent next steps."
+    )
+    return f"Structured physiomarkers report:\n\n{report_text}\n\n{guidance}"
+
+# Updated wrappers: accept api_key and model as parameters (do not rely only on env)
+def call_openai(prompt, api_key=None, model=None, max_tokens=300, temperature=0.2):
+    model = model or DEFAULT_OPENAI_MODEL
+    api_key = api_key or os.getenv("OPENAI_API_KEY")
+    if not api_key or openai is None:
+        return None
+
+    # Try new OpenAI client (openai>=1.0.0): openai.OpenAI(...)
+    try:
+        if hasattr(openai, "OpenAI"):
+            # New library interface
+            client = openai.OpenAI(api_key=api_key)
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a concise clinical summarizer."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            # Extract message content robustly
+            content = None
+            try:
+                # preferred attribute access when SDK returns objects
+                content = resp.choices[0].message.content
+            except Exception:
+                try:
+                    # dict-like access
+                    content = resp["choices"][0]["message"]["content"]
+                except Exception:
+                    content = str(resp)
+            return {"provider": "openai", "model": model, "text": content}
+        else:
+            # Older openai package interface fallback
+            openai.api_key = api_key
+            resp = openai.ChatCompletion.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a concise clinical summarizer."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            text = resp["choices"][0]["message"]["content"].strip()
+            return {"provider": "openai", "model": model, "text": text}
+    except Exception as e:
+        # If first try fails, attempt a fallback to DEFAULT_OPENAI_FALLBACK using same detection
+        try:
+            fallback_model = DEFAULT_OPENAI_FALLBACK
+            if hasattr(openai, "OpenAI"):
+                client = openai.OpenAI(api_key=api_key)
+                resp = client.chat.completions.create(
+                    model=fallback_model,
+                    messages=[
+                        {"role": "system", "content": "You are a concise clinical summarizer."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                content = None
+                try:
+                    content = resp.choices[0].message.content
+                except Exception:
+                    content = resp["choices"][0]["message"]["content"] if isinstance(resp, dict) else str(resp)
+                return {"provider": "openai", "model": fallback_model, "text": content}
+            else:
+                openai.api_key = api_key
+                resp = openai.ChatCompletion.create(
+                    model=fallback_model,
+                    messages=[
+                        {"role": "system", "content": "You are a concise clinical summarizer."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                text = resp["choices"][0]["message"]["content"].strip()
+                return {"provider": "openai", "model": fallback_model, "text": text}
+        except Exception as e2:
+            return {"provider": "openai", "error": str(e)}
+
+def call_claude(prompt, api_key=None, model=None, max_tokens=300, temperature=0.2):
+    model = model or DEFAULT_CLAUDE_MODEL
+    api_key = api_key or os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY")
+    if not api_key or Anthropic is None:
+        return None
+    client = Anthropic(api_key=api_key)
+    try:
+        full_prompt = HUMAN_PROMPT + prompt + AI_PROMPT
+        resp = client.completions.create(
+            model=model,
+            prompt=full_prompt,
+            max_tokens_to_sample=max_tokens,
+            temperature=temperature,
+        )
+        text = resp["completion"].strip()
+        return {"provider": "claude", "model": model, "text": text}
+    except Exception as e:
+        return {"provider": "claude", "error": str(e)}
+
+def load_csv_first_row(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"CSV file not found: {path}")
+    df = pd.read_csv(path)
+    if df.shape[0] < 1:
+        raise ValueError("CSV appears empty")
+    return df.iloc[0].to_dict()
+
+def run_report(csv_path, call_llm=True, openai_key=None, openai_model=None, claude_key=None, claude_model=None, save_path=None, json_mode=False, print_output=True):
+    row = load_csv_first_row(csv_path)
+    rows = build_feature_rows(row)
+    cat_summary = category_summary(rows)
+    report_text = build_report_text(rows, cat_summary)
+
+    if print_output:
+        print("\n" + "="*80)
+        print("DETAILED PHYSIOMARKERS REPORT")
+        print("="*80 + "\n")
+        print(report_text)
+        print("\n" + "="*80 + "\n")
+
+    if save_path:
+        if json_mode:
+            out = {"report": report_text, "summary": cat_summary}
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(out, f, indent=2)
+        else:
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(report_text)
+        if print_output:
+            print(f"Report saved to: {save_path}")
+
+    llm_outputs = {}
+    if call_llm:
+        prompt = create_prompt_for_llm(report_text)
+        # OpenAI (if key available either from arg or env)
+        if (openai_key or os.getenv("OPENAI_API_KEY")) and openai is not None:
+            if print_output:
+                print("Calling OpenAI...")
+            res = call_openai(prompt, api_key=openai_key, model=openai_model)
+            if res:
+                llm_outputs["openai"] = res
+                if print_output:
+                    if "text" in res:
+                        print(f"\n--- OpenAI ({res.get('model')}) concise interpretation ---\n{res['text']}\n")
+                    else:
+                        print(f"(OpenAI error: {res.get('error')})\n")
+        else:
+            if print_output:
+                print("(OpenAI call skipped: API key or openai package missing.)")
+        time.sleep(0.6)
+        # Claude/Anthropic
+        if (claude_key or os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY")) and Anthropic is not None:
+            if print_output:
+                print("Calling Anthropic/Claude...")
+            res = call_claude(prompt, api_key=claude_key, model=claude_model)
+            if res:
+                llm_outputs["claude"] = res
+                if print_output:
+                    if "text" in res:
+                        print(f"\n--- Claude ({res.get('model')}) concise interpretation ---\n{res['text']}\n")
+                    else:
+                        print(f"(Claude error: {res.get('error')})\n")
+        else:
+            if print_output:
+                print("(Claude call skipped: API key or anthropic package missing.)")
+    return {"report": report_text, "category_summary": cat_summary, "llm": llm_outputs}
+
+def print_example_usage():
+    examples = [
+        "python detailed_report_with_model_options.py",
+        "python detailed_report_with_model_options.py --csv physiomarkers.csv --save report.txt",
+        "export OPENAI_API_KEY='sk-...' && python detailed_report_with_model_options.py --openai-model gpt-4o-mini",
+        "python detailed_report_with_model_options.py --openai-key sk-... --openai-model gpt-4o-mini",
+        "python detailed_report_with_model_options.py --no-llm",
+    ]
+    print("Example commands:")
+    for e in examples:
+        print("  " + e)
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Generate a detailed physiomarkers report (single-row CSV).")
+    parser.add_argument("--csv", "-c", default=DEFAULT_CSV, help="Path to physiomarkers CSV (single aggregated row).")
+    parser.add_argument("--no-llm", action="store_true", help="Do not call LLMs, even if API keys are present.")
+    parser.add_argument("--save", "-s", help="Save report to file (path). Use --json to save JSON.")
+    parser.add_argument("--json", action="store_true", help="When used with --save, save as JSON (report+metadata).")
+    parser.add_argument("--example", action="store_true", help="Print example usage and exit.")
+    parser.add_argument("--quiet", action="store_true", help="Do not print report to stdout.")
+    # New options for keys and models
+    parser.add_argument("--openai-key", help="OpenAI API key (optional; prefer OPENAI_API_KEY env var).")
+    parser.add_argument("--openai-model", default=DEFAULT_OPENAI_MODEL, help="OpenAI model to use (e.g., gpt-4o-mini).")
+    parser.add_argument("--claude-key", help="Anthropic/Claude API key (optional; prefer ANTHROPIC_API_KEY env var).")
+    parser.add_argument("--claude-model", default=DEFAULT_CLAUDE_MODEL, help="Claude model to use (e.g., claude-2.1).")
+    args = parser.parse_args(argv)
+
+    if args.example:
+        print_example_usage()
+        return 0
+
+    # Warn about CLI-in-proc key usage
+    if args.openai_key or args.claude_key:
+        print("Warning: passing API keys on the command line can be visible to other processes/users. Consider using environment variables instead.")
+
+    try:
+        result = run_report(
+            csv_path=args.csv,
+            call_llm=(not args.no_llm),
+            openai_key=args.openai_key,
+            openai_model=args.openai_model,
+            claude_key=args.claude_key,
+            claude_model=args.claude_model,
+            save_path=args.save,
+            json_mode=args.json,
+            print_output=(not args.quiet)
+        )
+        return 0
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+---
+
+Q: Thanks. Along with CLI style, how can I call this on jupyter notebook's cell too through function calling?
+A:
+1. Explanation
+
+- What changed: I added a plain Python function (generate_report) you can import and call from a Jupyter notebook (or any Python script). It wraps the existing report-generation and optional LLM-calling logic but defaults to non-printing behavior so it is notebook-friendly. CLI behavior is preserved.
+- How to use in a notebook (examples):
+  - Install dependencies: pip install pandas (and pip install openai anthropic if you want LLM summarization).
+  - Import and call without LLMs:
+    from detailed_report_with_model_options import generate_report
+    result = generate_report(csv_path="physiomarkers.csv", call_llm=False)
+    print(result["report"])
+  - Call with OpenAI model/key (pass as args or set OPENAI_API_KEY env var):
+    result = generate_report(csv_path="physiomarkers.csv", call_llm=True,
+                             openai_key="sk-...", openai_model="gpt-4o-mini")
+    print(result["llm"]["openai"]["text"])
+  - The function returns a dict: {"report": report_text, "category_summary": cat_summary, "llm": llm_outputs}. You can display/inspect/serialize it in the notebook.
+
+2. Modified Code
+
+```python
+#!/usr/bin/env python3
+"""
+detailed_report_with_notebook_support.py
+
+Same detailed physiomarkers report as before, with:
+ - CLI entrypoint preserved
+ - A notebook-friendly function `generate_report(...)` that returns the report dict (no printing by default)
+ - Optionally call OpenAI / Anthropic by passing keys/models (or using env vars)
+"""
+import os
+import sys
+import argparse
+import json
+import math
+import time
+import pandas as pd
+
+# Optional LLM clients (may not be installed)
+try:
+    import openai
+except Exception:
+    openai = None
+
+try:
+    from anthropic import Anthropic, HUMAN_PROMPT, AI_PROMPT
+except Exception:
+    Anthropic = None
+    HUMAN_PROMPT = ""
+    AI_PROMPT = ""
+
+# Defaults
+DEFAULT_CSV = "physiomarkers.csv"
+DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
+DEFAULT_OPENAI_FALLBACK = "gpt-3.5-turbo"
+DEFAULT_CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-2.1")
+
+# Feature map and ranges (same as earlier versions)
+FEATURE_MAP = {
+    "ECG_HR_bpm_mean": ("ECG mean heart rate", "bpm"),
+    "ECG_T_rr_ms_mean": ("ECG mean RR interval", "ms"),
+    "ECG_qt_interval_ms_mean": ("QT interval", "ms"),
+    "ECG_qtc_interval_ms_mean": ("Corrected QT (QTc)", "ms"),
+    "ECG_pr_interval_ms_mean": ("PR interval", "ms"),
+    "ECG_QRS_duration_mean": ("QRS duration", "ms"),
+    "HRV_HRV_SDNN": ("HRV SDNN (overall variability)", "ms"),
+    "HRV_HRV_RMSSD": ("HRV RMSSD (short-term vagal)", "ms"),
+    "HRV_HRV_pNN50": ("HRV pNN50 (fraction)", ""),
+    "ABP_SBP_mean": ("Systolic blood pressure (mean)", "mmHg"),
+    "ABP_DBP_mean": ("Diastolic blood pressure (mean)", "mmHg"),
+    "ABP_MAP_mean": ("Mean arterial pressure (mean)", "mmHg"),
+    "ABP_CO_mean": ("Cardiac output (mean)", "L/min"),
+    "ABP_TPR_mean": ("Total peripheral resistance (mean)", "dyn·s/cm^5"),
+    "ABP_ShockIndex_mean": ("Shock index (HR/SBP mean)", "ratio"),
+    "RESP_resp_rate_Bpm_mean": ("Respiratory rate (mean)", "breaths/min"),
+    "PPG_PR_mean": ("PPG pulse rate (mean)", "bpm"),
+    "PPG_pat_ms_mean": ("Pulse arrival time (PAT mean)", "ms"),
+    "PPG_SI_mean": ("PPG Stiffness Index (mean)", "unitless"),
+    "PPG_RI_mean": ("PPG Reflection Index (mean)", "unitless"),
+    "PPG_Augmentation_index_mean": ("PPG Augmentation Index (mean)", "%"),
+}
+
+NORMAL_RANGES = {
+    "ECG_HR_bpm_mean": (60, 100, "Adult resting HR; context dependent"),
+    "ECG_T_rr_ms_mean": (600, 1000, "RR in ms ≈ 60-100 bpm"),
+    "ECG_qt_interval_ms_mean": (300, 450, "QT (ms) typical; depends on HR"),
+    "ECG_qtc_interval_ms_mean": (None, 440, "QTc: >440 ms may be prolonged"),
+    "ECG_pr_interval_ms_mean": (120, 200, "PR interval 120–200 ms"),
+    "ECG_QRS_duration_mean": (0, 120, "QRS <120 ms normal"),
+    "HRV_HRV_SDNN": (50, 150, "SDNN approx (context-dependent)"),
+    "HRV_HRV_RMSSD": (20, 50, "RMSSD typical short-term"),
+    "HRV_HRV_pNN50": (0.1, 0.4, "pNN50 fraction (approx)"),
+    "ABP_SBP_mean": (90, 140, "Systolic BP approx normal range"),
+    "ABP_DBP_mean": (60, 90, "Diastolic BP approx normal range"),
+    "ABP_MAP_mean": (65, 110, "MAP for perfusion"),
+    "ABP_CO_mean": (3.0, 7.0, "Cardiac output L/min"),
+    "RESP_resp_rate_Bpm_mean": (12, 20, "Adult resting RR"),
+    "PPG_PR_mean": (60, 100, "Pulse rate should roughly match ECG HR"),
+    "PPG_pat_ms_mean": (180, 400, "Pulse arrival time varies by system"),
+}
+
+CATEGORY_PREFIXES = {
+    "ECG_": "Cardiac / ECG",
+    "HRV_": "Autonomic / HRV",
+    "RESP_": "Respiratory",
+    "ABP_": "Hemodynamics / Blood pressure",
+    "PPG_": "Peripheral / PPG",
+}
+
+def get_category_for_feature(fid):
+    for pfx, name in CATEGORY_PREFIXES.items():
+        if fid.startswith(pfx):
+            return name
+    return "Other"
+
+def evaluate_value(fid, val):
+    if val is None:
+        return "Missing", "No value"
+    try:
+        v = float(val)
+    except Exception:
+        return "Missing", "Non-numeric"
+    if math.isnan(v):
+        return "Missing", "NaN"
+
+    if fid not in NORMAL_RANGES:
+        return "Informational", "No approximate range available"
+
+    low, high, note = NORMAL_RANGES[fid]
+    if low is not None and high is not None:
+        margin_low = low * 0.9 if low != 0 else low - 0.1
+        margin_high = high * 1.1
+        if low <= v <= high:
+            return "Normal", note or ""
+        if margin_low <= v < low or high < v <= margin_high:
+            return "Borderline", f"Near threshold; {note or ''}"
+        return "Abnormal", f"Outside typical range; {note or ''}"
+    elif low is None and high is not None:
+        if v <= high:
+            return "Normal", note or ""
+        if v <= high * 1.1:
+            return "Borderline", f"Near high threshold; {note or ''}"
+        return "Abnormal", f"Above expected; {note or ''}"
+    elif low is not None and high is None:
+        if v >= low:
+            return "Normal", note or ""
+        if v >= low * 0.9:
+            return "Borderline", f"Near low threshold; {note or ''}"
+        return "Abnormal", f"Below expected; {note or ''}"
+    else:
+        return "Informational", "No numeric range defined"
+
+def build_implication(fid, value, status):
+    if value is None or status == "Missing":
+        return "Value not available."
+    try:
+        v = float(value)
+    except Exception:
+        return "Non-numeric value; cannot interpret."
+    if fid == "ECG_HR_bpm_mean":
+        if v < 50:
+            return "Bradycardia range — correlate clinically (symptoms, meds)."
+        if v > 110:
+            return "Tachycardia — consider fever, pain, dehydration, arrhythmia."
+        return "Rate within expected resting range."
+    if fid == "RESP_resp_rate_Bpm_mean":
+        if v < 10:
+            return "Low respiratory rate — evaluate ventilatory status."
+        if v > 24:
+            return "Tachypnea — consider respiratory distress or metabolic cause."
+        return "Respiratory rate within expected resting range."
+    if fid in ("ECG_qt_interval_ms_mean", "ECG_qtc_interval_ms_mean"):
+        if status == "Abnormal":
+            return "Prolonged QT/QTc — consider drugs, electrolytes, clinical context."
+        return "QT interval within referenced range."
+    if fid == "ECG_QRS_duration_mean":
+        if v >= 120:
+            return "Wide QRS — consider conduction delay or bundle branch block."
+        return "QRS duration within expected range."
+    if fid in ("HRV_HRV_SDNN", "HRV_HRV_RMSSD", "HRV_HRV_pNN50"):
+        if status == "Abnormal":
+            return "Low HRV — may indicate reduced autonomic variability."
+        return "HRV metric in expected range for short-term recording."
+    if fid in ("PPG_SI_mean", "PPG_RI_mean", "PPG_Augmentation_index_mean", "PPG_pat_ms_mean"):
+        return "Peripheral waveform index — interpret trend-wise and with device-specific norms."
+    return "Interpret with clinical context."
+
+def build_feature_rows(row):
+    rows = []
+    for fid, (label, unit) in FEATURE_MAP.items():
+        raw = row.get(fid, None)
+        if pd.isna(raw):
+            raw = None
+        status, note = evaluate_value(fid, raw)
+        implication = build_implication(fid, raw, status)
+        rows.append({
+            "feature_id": fid,
+            "label": label,
+            "unit": unit,
+            "value": raw,
+            "status": status,
+            "note": note,
+            "implication": implication,
+            "category": get_category_for_feature(fid),
+        })
+    return rows
+
+def category_summary(rows):
+    by_cat = {}
+    for r in rows:
+        by_cat.setdefault(r["category"], []).append(r)
+    summaries = {}
+    for cat, items in by_cat.items():
+        total = len(items)
+        abnormal = sum(1 for it in items if it["status"] == "Abnormal")
+        borderline = sum(1 for it in items if it["status"] == "Borderline")
+        missing = sum(1 for it in items if it["status"] == "Missing")
+        score = (abnormal + 0.5 * borderline) / total if total > 0 else 0
+        if score == 0:
+            grade = "A"
+        elif score <= 0.2:
+            grade = "B"
+        elif score <= 0.4:
+            grade = "C"
+        elif score <= 0.7:
+            grade = "D"
+        else:
+            grade = "E"
+        summaries[cat] = {
+            "total": total, "abnormal": abnormal, "borderline": borderline,
+            "missing": missing, "score": round(score, 3), "grade": grade
+        }
+    return summaries
+
+def build_report_text(rows, cat_summary):
+    lines = []
+    lines.append("Clinical physiomarkers detailed report\n")
+    lines.append("Note: reference ranges are approximate. This is a single aggregated row; correlate with clinical context and raw waveforms.\n")
+    lines.append("Findings:")
+    for r in rows:
+        val_str = "N/A" if r["value"] is None else f"{r['value']}"
+        unit = f" {r['unit']}" if r['unit'] else ""
+        lines.append(f"- {r['label']} ({r['feature_id']}): {val_str}{unit} — {r['status']}. {r['implication']} ({r['note']})")
+    lines.append("\nReport card (by category):")
+    for cat, s in cat_summary.items():
+        lines.append(f"- {cat}: Grade {s['grade']} (abnormal {s['abnormal']}/{s['total']}, borderline {s['borderline']}, score {s['score']})")
+    lines.append("\nConcise interpretation (auto):")
+    abn = [r for r in rows if r["status"] == "Abnormal"]
+    bdr = [r for r in rows if r["status"] == "Borderline"]
+    if abn:
+        lines.append("- Key abnormal findings:")
+        for t in abn[:4]:
+            lines.append(f"  • {t['label']}: {t['value']} {t['unit']} — {t['implication']}")
+    else:
+        lines.append("- No strongly abnormal values detected in the mapped features.")
+    if bdr:
+        lines.append("- Borderline observations to watch:")
+        for t in bdr[:4]:
+            lines.append(f"  • {t['label']}: {t['value']} {t['unit']} — {t['implication']}")
+    lines.append("\nSuggested next steps (non-urgent):")
+    lines.append("1) Verify abnormal values against raw data and clinical context (ECG strips, waveform, cuff BP).")
+    lines.append("2) Review medications and electrolytes if QT/QTc prolonged or HRV very low.")
+    lines.append("3) Repeat measurement or monitor if hemodynamic instability suspected (MAP, Shock Index).")
+    lines.append("\nUncertainty & limitations: single aggregated row; device-specific indices need population norms. Not a diagnosis.")
+    return "\n".join(lines)
+
+def create_prompt_for_llm(report_text):
+    guidance = (
+        "You are a clinical-style assistant. Using the structured report below, produce a concise interpretation "
+        "in 4-6 short bullets — each: finding, implication, and degree of certainty (low/medium/high). "
+        "Do NOT provide definitive diagnoses. Conclude with 2 recommended non-urgent next steps."
+    )
+    return f"Structured physiomarkers report:\n\n{report_text}\n\n{guidance}"
+
+# OpenAI wrapper that supports both old and new openai-python interfaces
+def call_openai(prompt, api_key=None, model=None, max_tokens=300, temperature=0.2):
+    model = model or DEFAULT_OPENAI_MODEL
+    api_key = api_key or os.getenv("OPENAI_API_KEY")
+    if not api_key or openai is None:
+        return None
+
+    try:
+        if hasattr(openai, "OpenAI"):
+            client = openai.OpenAI(api_key=api_key)
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a concise clinical summarizer."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            # Extract content robustly
+            try:
+                content = resp.choices[0].message.content
+            except Exception:
+                content = resp["choices"][0]["message"]["content"] if isinstance(resp, dict) else str(resp)
+            return {"provider": "openai", "model": model, "text": content}
+        else:
+            openai.api_key = api_key
+            resp = openai.ChatCompletion.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a concise clinical summarizer."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            text = resp["choices"][0]["message"]["content"].strip()
+            return {"provider": "openai", "model": model, "text": text}
+    except Exception as e:
+        # Try fallback
+        try:
+            fallback = DEFAULT_OPENAI_FALLBACK
+            if hasattr(openai, "OpenAI"):
+                client = openai.OpenAI(api_key=api_key)
+                resp = client.chat.completions.create(
+                    model=fallback,
+                    messages=[
+                        {"role": "system", "content": "You are a concise clinical summarizer."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                try:
+                    content = resp.choices[0].message.content
+                except Exception:
+                    content = resp["choices"][0]["message"]["content"] if isinstance(resp, dict) else str(resp)
+                return {"provider": "openai", "model": fallback, "text": content}
+            else:
+                openai.api_key = api_key
+                resp = openai.ChatCompletion.create(
+                    model=fallback,
+                    messages=[
+                        {"role": "system", "content": "You are a concise clinical summarizer."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                text = resp["choices"][0]["message"]["content"].strip()
+                return {"provider": "openai", "model": fallback, "text": text}
+        except Exception:
+            return {"provider": "openai", "error": str(e)}
+
+def call_claude(prompt, api_key=None, model=None, max_tokens=300, temperature=0.2):
+    model = model or DEFAULT_CLAUDE_MODEL
+    api_key = api_key or os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY")
+    if not api_key or Anthropic is None:
+        return None
+    client = Anthropic(api_key=api_key)
+    try:
+        full_prompt = HUMAN_PROMPT + prompt + AI_PROMPT
+        resp = client.completions.create(
+            model=model,
+            prompt=full_prompt,
+            max_tokens_to_sample=max_tokens,
+            temperature=temperature,
+        )
+        text = resp["completion"].strip()
+        return {"provider": "claude", "model": model, "text": text}
+    except Exception as e:
+        return {"provider": "claude", "error": str(e)}
+
+def load_csv_first_row(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"CSV file not found: {path}")
+    df = pd.read_csv(path)
+    if df.shape[0] < 1:
+        raise ValueError("CSV appears empty")
+    return df.iloc[0].to_dict()
+
+def run_report(csv_path, call_llm=True, openai_key=None, openai_model=None, claude_key=None, claude_model=None, save_path=None, json_mode=False, print_output=True):
+    """
+    Internal runner used by both CLI and the notebook wrapper.
+    """
+    row = load_csv_first_row(csv_path)
+    rows = build_feature_rows(row)
+    cat_summary = category_summary(rows)
+    report_text = build_report_text(rows, cat_summary)
+
+    if print_output:
+        print("\n" + "="*80)
+        print("DETAILED PHYSIOMARKERS REPORT")
+        print("="*80 + "\n")
+        print(report_text)
+        print("\n" + "="*80 + "\n")
+
+    if save_path:
+        if json_mode:
+            out = {"report": report_text, "summary": cat_summary}
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(out, f, indent=2)
+        else:
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(report_text)
+        if print_output:
+            print(f"Report saved to: {save_path}")
+
+    llm_outputs = {}
+    if call_llm:
+        prompt = create_prompt_for_llm(report_text)
+        # OpenAI
+        if (openai_key or os.getenv("OPENAI_API_KEY")) and openai is not None:
+            if print_output:
+                print("Calling OpenAI...")
+            res = call_openai(prompt, api_key=openai_key, model=openai_model)
+            if res:
+                llm_outputs["openai"] = res
+                if print_output:
+                    if "text" in res:
+                        print(f"\n--- OpenAI ({res.get('model')}) concise interpretation ---\n{res['text']}\n")
+                    else:
+                        print(f"(OpenAI error: {res.get('error')})\n")
+        else:
+            if print_output:
+                print("(OpenAI call skipped: API key or openai package missing.)")
+        time.sleep(0.6)
+        # Claude
+        if (claude_key or os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY")) and Anthropic is not None:
+            if print_output:
+                print("Calling Anthropic/Claude...")
+            res = call_claude(prompt, api_key=claude_key, model=claude_model)
+            if res:
+                llm_outputs["claude"] = res
+                if print_output:
+                    if "text" in res:
+                        print(f"\n--- Claude ({res.get('model')}) concise interpretation ---\n{res['text']}\n")
+                    else:
+                        print(f"(Claude error: {res.get('error')})\n")
+        else:
+            if print_output:
+                print("(Claude call skipped: API key or anthropic package missing.)")
+    return {"report": report_text, "category_summary": cat_summary, "llm": llm_outputs}
+
+def generate_report(csv_path=DEFAULT_CSV, call_llm=False, openai_key=None, openai_model=None, claude_key=None, claude_model=None, save_path=None, json_mode=False, display=False):
+    """
+    Notebook-friendly function.
+
+    Parameters:
+      csv_path: path to single-row physiomarkers CSV.
+      call_llm: whether to call LLMs (default False in notebook usage).
+      openai_key/openai_model: optional overrides (or set OPENAI_API_KEY env var).
+      claude_key/claude_model: optional overrides (or set ANTHROPIC_API_KEY env var).
+      save_path/json_mode: optional saving behavior.
+      display: if True, prints the report to stdout (useful in scripts); default False.
+
+    Returns:
+      dict: {"report": str, "category_summary": dict, "llm": dict}
+    """
+    # Use run_report under the hood but avoid printing unless display=True
+    return run_report(
+        csv_path=csv_path,
+        call_llm=call_llm,
+        openai_key=openai_key,
+        openai_model=openai_model,
+        claude_key=claude_key,
+        claude_model=claude_model,
+        save_path=save_path,
+        json_mode=json_mode,
+        print_output=display
+    )
+
+# CLI entrypoint is preserved
+def print_example_usage():
+    examples = [
+        "python detailed_report_with_notebook_support.py",
+        "python detailed_report_with_notebook_support.py --csv physiomarkers.csv --save report.txt",
+        "export OPENAI_API_KEY='sk-...' && python detailed_report_with_notebook_support.py --openai-model gpt-4o-mini",
+        "python detailed_report_with_notebook_support.py --openai-key sk-... --openai-model gpt-4o-mini",
+        "python detailed_report_with_notebook_support.py --no-llm",
+    ]
+    print("Example commands:")
+    for e in examples:
+        print("  " + e)
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Generate a detailed physiomarkers report (single-row CSV).")
+    parser.add_argument("--csv", "-c", default=DEFAULT_CSV, help="Path to physiomarkers CSV (single aggregated row).")
+    parser.add_argument("--no-llm", action="store_true", help="Do not call LLMs, even if API keys are present.")
+    parser.add_argument("--save", "-s", help="Save report to file (path). Use --json to save JSON.")
+    parser.add_argument("--json", action="store_true", help="When used with --save, save as JSON (report+metadata).")
+    parser.add_argument("--example", action="store_true", help="Print example usage and exit.")
+    parser.add_argument("--quiet", action="store_true", help="Do not print report to stdout.")
+    parser.add_argument("--openai-key", help="OpenAI API key (optional; prefer OPENAI_API_KEY env var).")
+    parser.add_argument("--openai-model", default=DEFAULT_OPENAI_MODEL, help="OpenAI model to use (e.g., gpt-4o-mini).")
+    parser.add_argument("--claude-key", help="Anthropic/Claude API key (optional; prefer ANTHROPIC_API_KEY env var).")
+    parser.add_argument("--claude-model", default=DEFAULT_CLAUDE_MODEL, help="Claude model to use (e.g., claude-2.1).")
+    args = parser.parse_args(argv)
+
+    if args.example:
+        print_example_usage()
+        return 0
+
+    if args.openai_key or args.claude_key:
+        print("Warning: passing API keys on the command line can be visible to other processes/users. Consider using environment variables instead.")
+
+    try:
+        result = run_report(
+            csv_path=args.csv,
+            call_llm=(not args.no_llm),
+            openai_key=args.openai_key,
+            openai_model=args.openai_model,
+            claude_key=args.claude_key,
+            claude_model=args.claude_model,
+            save_path=args.save,
+            json_mode=args.json,
+            print_output=(not args.quiet)
+        )
+        return 0
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+---
+

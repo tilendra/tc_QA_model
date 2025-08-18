@@ -1,0 +1,526 @@
+Q: I want to create a foundational model with concurrent ECG and PPG waveforms from MIMIC-III/IV and Pitts Univ waveform data for multiple clinical decision tasks, including various disease diagnosis and clinical report generation. Most of the physiological waveform-based FM models are either single waveform-based (like only ECG - GEM, ECG-FM, ECG Nest FM, https://arxiv.org/html/2407.07110v1 / only PPG - PaPaGei, GPT-PPG, Pulse PPG) or superficial (high-level) and not capable to critic on clinical depth. For example, they are (a) unable to handle the incomplete waveform time-series and (b) unable to answer the effect of medications or therapies into waveform shapes and (c) unable to handle inter-signal (ECG-PPG coupling) dynamics, and (d) can't generate other signal if one signal (ECG/PPG) is given. Could you help me to make stretegy and plans to achieve the desired multimodal FM building?
+A:
+Below is a concise, practical strategy and plan to build a multimodal foundational model (FM) that jointly models concurrent ECG + PPG waveforms from MIMIC-III/IV and Pitt Waveform datasets for clinical tasks (diagnosis, report generation, cross-signal generation, medication/therapy effects, etc.).
+
+1) High-level approach (stages)
+- Stage A — Data ingestion & harmonization: collect/clean/sync ECG, PPG, and EHR context (demographics, labs, meds, interventions, notes).
+- Stage B — Self-supervised multimodal pretraining: learn strong joint ECG–PPG representations using large unlabeled waveform corpora.
+- Stage C — Task-specific supervised fine-tuning: diagnosis, event detection, report generation, ECG↔PPG generation, treatment-effect prediction.
+- Stage D — Clinical evaluation, calibration, safety, deployment: clinician review, prospective validation, IRB/regulatory work.
+
+2) Data & preprocessing (practical)
+- Sources & governance: obtain MIMIC-III/IV Waveform + matched clinical records, Pitt Waveform; ensure DUAs/IRB compliance and de-identification.
+- Synchronization: align ECG and PPG via device timestamps; resample to common Fs (e.g., 125–250 Hz typical for bedside); preserve original if using continuous-time models.
+- Baseline filtering: notch (50/60Hz), bandpass for ECG/PPG; remove lead disconnects and artifactual segments with artifact detectors.
+- Beat/feature extraction (optional): R-peaks (ECG), pulse onsets (PPG), HR, HRV, pulse amplitude, pulse arrival time (PAT)/pulse transit time (PTT). Compute these as auxiliary supervision.
+- Missingness metadata: keep explicit masks & provenance (removed, clipped, device gap). Timestamp medication administrations, ventilation, fluid boluses, pacing, etc.
+- Label extraction: ICD codes, chart events, note-derived phenotypes (use NLP), time-lock labels to waveform windows.
+
+3) Modeling: core design ideas
+- Dual-stream temporal encoders: separate ECG and PPG encoders (e.g., 1D Conv front-end + Transformer / Temporal Convolutional Network), producing per-time-step and pooled embeddings.
+- Cross-modal fusion: add cross-attention blocks or cross-modal contrastive heads that learn coupling (ECG ↔ PPG). Architectures: dual-stream Transformer with periodic cross-attention, Perceiver IO, or multimodal Mixture-of-Experts.
+- Representation-level objectives:
+  - Masked reconstruction (masked waveform modeling / MAE-style) per modality.
+  - Cross-modal contrastive learning: positive pairs = synchronous ECG+PPG windows; negatives = temporally/multi-subject mismatches.
+  - Temporal predictive objectives: contrastive predictive coding / next-window prediction.
+  - Beat-aligned losses: align beats and minimize PAT/PTT prediction errors.
+- Conditional generation for cross-signal synthesis:
+  - Sequence-to-sequence transformer or diffusion-based generative model conditioned on source waveform + context.
+  - Losses: reconstruction (L1/L2), adversarial (for realistic microstructure), waveform perceptual loss (DTW, dynamic features), beat-timing loss.
+- Treatment/medication modeling:
+  - Time-conditioned modeling: concatenate treatment event embeddings/time-since-treatment; use temporal attention to model immediate and downstream waveform effects.
+  - Causal/time-to-event methods: incorporate propensity score features or marginal structural modeling as downstream tasks to estimate treatment effects on waveform features.
+  - Counterfactual learning: train models to predict waveform under alternate treatment coditions (treatment-conditioned decoder) with regularization and careful evaluation.
+- Missing-data & irregular sampling:
+  - Explicit masking + missingness embedding (informative missingness).
+  - Continuous-time models: Neural ODEs / latent ODEs or interpolation networks for arbitrary time queries.
+  - Denoising autoencoders / diffusion for inpainting gaps; train on simulated missingness.
+
+4) Training objectives (combined)
+- Self-supervised losses (primary pretraining): masked reconstruction + cross-modal contrastive + temporal predictive.
+- Auxiliary supervision: beat features, HR/HRV, PAT/PTT prediction as regression heads.
+- Multi-task finetuning losses: classification (CE/BCE), sequence generation (teacher forcing, cross-entropy for text), waveform generation (L1/adv/DTW).
+- Calibration & uncertainty: explicit predictive uncertainty heads (MC dropout, ensemble, or heteroscedastic losses).
+
+5) Evaluation & metrics
+- Waveform fidelity: MSE, SNR, DTW, spectral metrics, visual Turing tests by clinicians.
+- Beat/clinical features: R-peak detection F1, HR error, PTT error.
+- Diagnostic tasks: AUROC, AUPRC, sensitivity at fixed specificity, F1; calibration (Brier score, calibration plots).
+- Cross-signal synthesis: waveform metrics + clinical downstream task performance (e.g., diagnosis from generated signal).
+- Treatment-effect evaluation: time-locked causal effect estimates vs. known physiological expectations; clinician adjudication.
+- Clinical validation: retrospective cohort performance + limited prospective/clinician-in-the-loop evaluation.
+
+6) Practical engineering & tooling
+- Libraries: WFDB/PhysioNet tools, HeartPy/Biosppy/neurokit2, PyTorch/TensorFlow, Hugging Face for text.
+- Data storage: compressed binary formats (HDF5/Zarr) with indices; manage bandwidth for large waveforms.
+- Compute: pretraining needs GPUs (A100-class) and multi-node training if dataset is large; consider mixed precision and gradient accumulation.
+- Reproducibility: version datasets, seed models, track experiments (MLflow/Weights & Biases).
+
+7) Risk mitigation & clinical safety
+- Distribution shifts: apply domain-adaptation (fine-tune to target hospital), continual learning, calibration.
+- Confounding & biases: control for demographic and device differences; avoid models learning device artifacts correlated with labels.
+- Explainability: attention visualization, saliency, beat-level attribution; produce human-readable reasoning for diagnoses.
+- Regulatory & privacy: keep DUA/IRB, HIPAA compliance, risk assessment and audit trail for any clinical deployment.
+
+8) Evaluation roadmap & milestones (example 9–12 months)
+- Month 0–2: DUAs, dataset ingestion, preprocessing pipelines, beat detectors, baseline analytics.
+- Month 2–4: Prototype encoders; small-scale self-supervised pretraining on subset; baseline tasks (R-peak, HR).
+- Month 4–7: Large-scale pretraining on full corpus; develop cross-modal objectives; initial cross-signal generation prototype.
+- Month 7–9: Fine-tune on diagnostics, report generation pipeline (encoder->LLM decoder with retrieval of clinical context); evaluate.
+- Month 9–12: Clinician review, prospective retrospective validation, robustness tests, iterate and prepare deployment/IRB studies.
+
+9) Key research/engineering choices and trade-offs
+- Pretraining scale vs compute: larger unlabeled pretraining gives robustness; balance with available compute.
+- Per-modality sampling: keeping high Fs preserves features (microvolt morphology), but increases cost; consider multi-resolution encoders.
+- Generative method for cross-signal: diffusion/score models produce realistic noise structures but are heavier; seq2seq may be simpler for beat-aligned conversion.
+- Causality: purely observational EHR/medication data confounds require careful causal modeling—do not overclaim causal effects without trial data.
+
+10) Collaboration & expertise needed
+- Cardiology/physiology clinicians for labels and evaluation.
+- ML researchers in time-series, multimodal learning, and causal inference.
+- Data engineers for waveform pipelines and privacy.
+- Regulatory/compliance specialists.
+
+11) Reproducible baselines & literature to follow
+- Masked/timeseries MAE, CPC, SimCLR variants for time-series.
+- Perceiver IO / dual-stream cross-attention multimodal models.
+- Diffusion models for continuous signals and ECG/PPG generation literature.
+- Papers to examine: GEM/ECG-FM, PaPaGei/GPT-PPG, contrastive cross-modal works and masked time-series models.
+
+Short checklist to start immediately
+- Get DUAs and download MIMIC/Pitt waveform + matched clinical tables.
+- Build robust ingestion + timestamp alignment + missingness mask pipeline.
+- Implement beat detectors and compute PTT/PAT consistently.
+- Prototype dual-encoder Transformer with (1) masked reconstruction and (2) cross-modal contrastive losses on small compute.
+- Iterate to cross-signal generator and attach treatment/event embeddings.
+
+If you want, I can:
+- Sketch a concrete model architecture (layers, sizes, losses) for a given compute budget.
+- Produce code templates for ingestion/beat detection and masking for MIMIC/Pitt waveforms.
+- Propose experiments and evaluation scripts for cross-signal generation and treatment-effect tests.
+
+---
+
+
+
+
+
+Provider set to 'openai'. Place the provider API key in the API Key field; it will be exported to the environment variable for that provider when you run.
+
+Starting job...
+
+Q1: I want to create a foundational model with concurrent ECG and PPG waveforms from MIMIC-III/IV and Pitts Univ waveform data for multiple clinical decision tasks, including various disease diagnosis and clinical report generation. Most of the physiological waveform-based FM models are either single waveform-based (like only ECG - GEM, ECG-FM, ECG Nest FM, https://arxiv.org/html/2407.07110v1 / only PPG - PaPaGei, GPT-PPG, Pulse PPG) or superficial (high-level) and not capable to critic on clinical depth. For example, they are (a) unable to handle the incomplete waveform time-series and (b) unable to answer the effect of medications or therapies into waveform shapes and (c) unable to handle inter-signal (ECG-PPG coupling) dynamics, and (d) can't generate other signal if one signal (ECG/PPG) is given. Could you help me to make stretegy and plans to achieve the desired multimodal FM building?
+
+A1: Below is a concise, practical strategy and plan to build a multimodal foundational model (FM) that jointly models concurrent ECG + PPG waveforms from MIMIC-III/IV and Pitt Waveform datasets for clinical tasks (diagnosis, report generation, cross-signal generation, medication/therapy effects, etc.).
+
+1) High-level approach (stages)
+- Stage A — Data ingestion & harmonization: collect/clean/sync ECG, PPG, and EHR context (demographics, labs, meds, interventions, notes).
+- Stage B — Self-supervised multimodal pretraining: learn strong joint ECG–PPG representations using large unlabeled waveform corpora.
+- Stage C — Task-specific supervised fine-tuning: diagnosis, event detection, report generation, ECG↔PPG generation, treatment-effect prediction.
+- Stage D — Clinical evaluation, calibration, safety, deployment: clinician review, prospective validation, IRB/regulatory work.
+
+2) Data & preprocessing (practical)
+- Sources & governance: obtain MIMIC-III/IV Waveform + matched clinical records, Pitt Waveform; ensure DUAs/IRB compliance and de-identification.
+- Synchronization: align ECG and PPG via device timestamps; resample to common Fs (e.g., 125–250 Hz typical for bedside); preserve original if using continuous-time models.
+- Baseline filtering: notch (50/60Hz), bandpass for ECG/PPG; remove lead disconnects and artifactual segments with artifact detectors.
+- Beat/feature extraction (optional): R-peaks (ECG), pulse onsets (PPG), HR, HRV, pulse amplitude, pulse arrival time (PAT)/pulse transit time (PTT). Compute these as auxiliary supervision.
+- Missingness metadata: keep explicit masks & provenance (removed, clipped, device gap). Timestamp medication administrations, ventilation, fluid boluses, pacing, etc.
+- Label extraction: ICD codes, chart events, note-derived phenotypes (use NLP), time-lock labels to waveform windows.
+
+3) Modeling: core design ideas
+- Dual-stream temporal encoders: separate ECG and PPG encoders (e.g., 1D Conv front-end + Transformer / Temporal Convolutional Network), producing per-time-step and pooled embeddings.
+- Cross-modal fusion: add cross-attention blocks or cross-modal contrastive heads that learn coupling (ECG ↔ PPG). Architectures: dual-stream Transformer with periodic cross-attention, Perceiver IO, or multimodal Mixture-of-Experts.
+- Representation-level objectives:
+  - Masked reconstruction (masked waveform modeling / MAE-style) per modality.
+  - Cross-modal contrastive learning: positive pairs = synchronous ECG+PPG windows; negatives = temporally/multi-subject mismatches.
+  - Temporal predictive objectives: contrastive predictive coding / next-window prediction.
+  - Beat-aligned losses: align beats and minimize PAT/PTT prediction errors.
+- Conditional generation for cross-signal synthesis:
+  - Sequence-to-sequence transformer or diffusion-based generative model conditioned on source waveform + context.
+  - Losses: reconstruction (L1/L2), adversarial (for realistic microstructure), waveform perceptual loss (DTW, dynamic features), beat-timing loss.
+- Treatment/medication modeling:
+  - Time-conditioned modeling: concatenate treatment event embeddings/time-since-treatment; use temporal attention to model immediate and downstream waveform effects.
+  - Causal/time-to-event methods: incorporate propensity score features or marginal structural modeling as downstream tasks to estimate treatment effects on waveform features.
+  - Counterfactual learning: train models to predict waveform under alternate treatment coditions (treatment-conditioned decoder) with regularization and careful evaluation.
+- Missing-data & irregular sampling:
+  - Explicit masking + missingness embedding (informative missingness).
+  - Continuous-time models: Neural ODEs / latent ODEs or interpolation networks for arbitrary time queries.
+  - Denoising autoencoders / diffusion for inpainting gaps; train on simulated missingness.
+
+4) Training objectives (combined)
+- Self-supervised losses (primary pretraining): masked reconstruction + cross-modal contrastive + temporal predictive.
+- Auxiliary supervision: beat features, HR/HRV, PAT/PTT prediction as regression heads.
+- Multi-task finetuning losses: classification (CE/BCE), sequence generation (teacher forcing, cross-entropy for text), waveform generation (L1/adv/DTW).
+- Calibration & uncertainty: explicit predictive uncertainty heads (MC dropout, ensemble, or heteroscedastic losses).
+
+5) Evaluation & metrics
+- Waveform fidelity: MSE, SNR, DTW, spectral metrics, visual Turing tests by clinicians.
+- Beat/clinical features: R-peak detection F1, HR error, PTT error.
+- Diagnostic tasks: AUROC, AUPRC, sensitivity at fixed specificity, F1; calibration (Brier score, calibration plots).
+- Cross-signal synthesis: waveform metrics + clinical downstream task performance (e.g., diagnosis from generated signal).
+- Treatment-effect evaluation: time-locked causal effect estimates vs. known physiological expectations; clinician adjudication.
+- Clinical validation: retrospective cohort performance + limited prospective/clinician-in-the-loop evaluation.
+
+6) Practical engineering & tooling
+- Libraries: WFDB/PhysioNet tools, HeartPy/Biosppy/neurokit2, PyTorch/TensorFlow, Hugging Face for text.
+- Data storage: compressed binary formats (HDF5/Zarr) with indices; manage bandwidth for large waveforms.
+- Compute: pretraining needs GPUs (A100-class) and multi-node training if dataset is large; consider mixed precision and gradient accumulation.
+- Reproducibility: version datasets, seed models, track experiments (MLflow/Weights & Biases).
+
+7) Risk mitigation & clinical safety
+- Distribution shifts: apply domain-adaptation (fine-tune to target hospital), continual learning, calibration.
+- Confounding & biases: control for demographic and device differences; avoid models learning device artifacts correlated with labels.
+- Explainability: attention visualization, saliency, beat-level attribution; produce human-readable reasoning for diagnoses.
+- Regulatory & privacy: keep DUA/IRB, HIPAA compliance, risk assessment and audit trail for any clinical deployment.
+
+8) Evaluation roadmap & milestones (example 9–12 months)
+- Month 0–2: DUAs, dataset ingestion, preprocessing pipelines, beat detectors, baseline analytics.
+- Month 2–4: Prototype encoders; small-scale self-supervised pretraining on subset; baseline tasks (R-peak, HR).
+- Month 4–7: Large-scale pretraining on full corpus; develop cross-modal objectives; initial cross-signal generation prototype.
+- Month 7–9: Fine-tune on diagnostics, report generation pipeline (encoder->LLM decoder with retrieval of clinical context); evaluate.
+- Month 9–12: Clinician review, prospective retrospective validation, robustness tests, iterate and prepare deployment/IRB studies.
+
+9) Key research/engineering choices and trade-offs
+- Pretraining scale vs compute: larger unlabeled pretraining gives robustness; balance with available compute.
+- Per-modality sampling: keeping high Fs preserves features (microvolt morphology), but increases cost; consider multi-resolution encoders.
+- Generative method for cross-signal: diffusion/score models produce realistic noise structures but are heavier; seq2seq may be simpler for beat-aligned conversion.
+- Causality: purely observational EHR/medication data confounds require careful causal modeling—do not overclaim causal effects without trial data.
+
+10) Collaboration & expertise needed
+- Cardiology/physiology clinicians for labels and evaluation.
+- ML researchers in time-series, multimodal learning, and causal inference.
+- Data engineers for waveform pipelines and privacy.
+- Regulatory/compliance specialists.
+
+11) Reproducible baselines & literature to follow
+- Masked/timeseries MAE, CPC, SimCLR variants for time-series.
+- Perceiver IO / dual-stream cross-attention multimodal models.
+- Diffusion models for continuous signals and ECG/PPG generation literature.
+- Papers to examine: GEM/ECG-FM, PaPaGei/GPT-PPG, contrastive cross-modal works and masked time-series models.
+
+Short checklist to start immediately
+- Get DUAs and download MIMIC/Pitt waveform + matched clinical tables.
+- Build robust ingestion + timestamp alignment + missingness mask pipeline.
+- Implement beat detectors and compute PTT/PAT consistently.
+- Prototype dual-encoder Transformer with (1) masked reconstruction and (2) cross-modal contrastive losses on small compute.
+- Iterate to cross-signal generator and attach treatment/event embeddings.
+
+If you want, I can:
+- Sketch a concrete model architecture (layers, sizes, losses) for a given compute budget.
+- Produce code templates for ingestion/beat detection and masking for MIMIC/Pitt waveforms.
+- Propose experiments and evaluation scripts for cross-signal generation and treatment-effect tests.
+
+Results saved to /Volumes/Personal/VScode_github/tc_QA_model/Output/answer (format=txt)
+
+Job completed.
+
+Output copied to clipboard.
+
+Output copied to clipboard.
+
+Starting job...
+
+Q1: Could you suggest which one I should work on for my ECG-PPG FM model creation:  (a) FM Modeling from scratch, (b) Instruction Tuning for an ICU-Specific LLM, and (c) Distillation for an ICU-Specific Model. Please provide details, pros, cons and specific model archetectures for each.
+
+A1: 1) Explanation — what the code will do (simple terms)
+
+- This is a compact PyTorch template for prototyping Stage A/B of the plan: self-supervised pretraining of a dual-stream ECG + PPG model.
+- The model has two parallel encoders (one for ECG, one for PPG). Each encoder is a small 1D-convolutional front-end followed by a Transformer encoder that produces per-time-step latent embeddings and a pooled embedding for the whole window.
+- Two pretraining objectives are implemented:
+  - Masked waveform modeling (MAE-style): we randomly mask time patches in each waveform input and ask a lightweight decoder to reconstruct the masked waveform samples (MSE loss). This encourages the model to learn local morphology and temporal structure.
+  - Cross-modal contrastive loss (NT-Xent): we use aligned ECG–PPG windows as positive pairs and treat other windows in the batch as negatives, forcing the pooled ECG and pooled PPG embeddings to be close for synchronous windows and far otherwise. This encourages the encoders to learn coupling between ECG and PPG (e.g., PTT/PAT relationships).
+- The template includes:
+  - A Dataset skeleton that should yield aligned ECG and PPG waveform windows (resampled and preprocessed externally).
+  - Masking utility to apply block/patched masking.
+  - Model definition (conv + transformer + simple linear decoder).
+  - Training loop showing how the two losses are combined and optimized.
+- You can extend this template to add beat-aligned auxiliary heads (HR/PTT regression), continuous-time modules, diffusion generators, or to swap encoders/decoders for heavier variants. This is intended as an actionable starting point to implement approach (a) — modeling from scratch — which I recommend as your first priority for an ECG–PPG FM because it builds the foundational joint representations you’ll need for downstream tasks (instruction tuning and distillation later).
+
+Recommendation summary (concise):
+- Start with (a) Modeling from scratch: priority 1. Rationale: you need robust joint ECG–PPG representations to support cross-signal generation, treatment-effect modeling, and accurate clinical feature extraction.
+- Follow with (b) Instruction tuning for an ICU-specific LLM: priority 2, after you have strong embeddings and retrieval/conditioning mechanisms (use waveform embeddings as context to LLMs or fine-tune multimodal LLMs).
+- Use (c) Distillation as a deploy/efficiency step: priority 3, to compress large pretrained models into smaller, faster models for edge/bedside inference.
+
+Now the code template (only code) — plug in your dataset, tune hyperparameters, and iterate:
+
+```python
+# Dual-stream ECG-PPG self-supervised pretraining template (PyTorch)
+# Requirements: torch, einops (optional)
+# Fill dataset paths, preprocessing, and hyperparameters as appropriate.
+
+import math
+import random
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+
+# ---------------------------
+# Helper utilities
+# ---------------------------
+
+def patch_mask(x, patch_size=16, mask_ratio=0.25):
+    # x: [B, C, T] (C=1 typically)
+    B, C, T = x.shape
+    n_patches = T // patch_size
+    mask = torch.zeros(B, n_patches, device=x.device, dtype=torch.bool)
+    n_mask = max(1, int(mask_ratio * n_patches))
+    for i in range(B):
+        idx = torch.randperm(n_patches)[:n_mask]
+        mask[i, idx] = True
+    # expand mask to time resolution
+    mask_time = mask.repeat_interleave(patch_size, dim=1)[:, :T]
+    return mask_time  # [B, T] boolean mask
+
+def nt_xent_loss(z1, z2, temperature=0.1):
+    # z1, z2: [B, D] - positive pairs aligned by batch index
+    # standard normalized temperature-scaled cross entropy (SimCLR-style)
+    z1 = F.normalize(z1, dim=-1)
+    z2 = F.normalize(z2, dim=-1)
+    B = z1.size(0)
+    representations = torch.cat([z1, z2], dim=0)  # 2B x D
+    sim_matrix = torch.matmul(representations, representations.T) / temperature
+    labels = torch.arange(B, device=z1.device)
+    labels = torch.cat([labels, labels], dim=0)
+    # mask out self-similarities
+    mask = (~torch.eye(2 * B, dtype=torch.bool, device=z1.device)).float()
+    exp_sim = torch.exp(sim_matrix) * mask
+    # positives are off-diagonals
+    positives = torch.exp(torch.sum(z1 * z2, dim=-1) / temperature)
+    positives = torch.cat([positives, positives], dim=0)
+    denom = exp_sim.sum(dim=1)
+    loss = -torch.log(positives / denom)
+    return loss.mean()
+
+# ---------------------------
+# Dataset skeleton
+# ---------------------------
+
+class ECGPPGWindowDataset(Dataset):
+    """
+    Provide aligned ECG and PPG waveform segments.
+    Each __getitem__ returns:
+      ecg: torch.Tensor [1, T]
+      ppg: torch.Tensor [1, T]
+      meta: dict with e.g., timestamps, patient id
+    Preprocessing (resampling, filtering, channel selection) should be done offline
+    or within a custom transform passed here.
+    """
+    def __init__(self, file_index, window_size=5000, transform=None):
+        self.index = file_index  # list of (ecg_path, ppg_path, start_idx) or preloaded arrays
+        self.window_size = window_size
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.index)
+
+    def __getitem__(self, idx):
+        ecg_arr, ppg_arr = self.index[idx]  # replace with your retrieval
+        # assume ecg_arr / ppg_arr are 1D numpy arrays or tensors with sufficient length
+        # Here we assume they are already windowed to exactly window_size
+        ecg = torch.as_tensor(ecg_arr, dtype=torch.float32).unsqueeze(0)  # [1, T]
+        ppg = torch.as_tensor(ppg_arr, dtype=torch.float32).unsqueeze(0)
+        if self.transform:
+            ecg, ppg = self.transform(ecg, ppg)
+        return {'ecg': ecg, 'ppg': ppg}
+
+# ---------------------------
+# Model components
+# ---------------------------
+
+class ConvFrontEnd(nn.Module):
+    def __init__(self, in_channels=1, hidden_channels=64, kernel_sizes=[15,9,5], stride=1):
+        super().__init__()
+        layers = []
+        c = in_channels
+        out = hidden_channels
+        for k in kernel_sizes:
+            layers.append(nn.Conv1d(c, out, kernel_size=k, stride=stride, padding=k//2))
+            layers.append(nn.BatchNorm1d(out))
+            layers.append(nn.GELU())
+            c = out
+            out = min(out * 2, 512)
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        # x: [B, C, T]
+        return self.net(x)  # [B, hidden, T]
+
+class SimpleTransformerEncoder(nn.Module):
+    def __init__(self, d_model=128, nhead=4, num_layers=4, dim_feedforward=256, dropout=0.1):
+        super().__init__()
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead,
+                                                   dim_feedforward=dim_feedforward, dropout=dropout,
+                                                   activation='gelu', batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.proj = nn.Linear(d_model, d_model)  # optional projection
+
+    def forward(self, x):
+        # x: [B, T, D] (we will permute before calling)
+        out = self.transformer(x)
+        return self.proj(out)
+
+class TimePooling(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.lin = nn.Linear(d_model, d_model)
+
+    def forward(self, x):
+        # x: [B, T, D]
+        x_t = x.permute(0, 2, 1)  # [B, D, T]
+        p = self.pool(x_t).squeeze(-1)  # [B, D]
+        return self.lin(p)
+
+class WaveDecoder(nn.Module):
+    def __init__(self, in_dim, out_channels=1, seq_len=5000):
+        super().__init__()
+        # simple linear decoder that maps per-time embeddings back to waveform samples
+        self.seq_len = seq_len
+        self.lin = nn.Linear(in_dim, seq_len)  # maps pooled or token embeddings to full waveform
+        # More sophisticated: use ConvTranspose or transformer decoder for per-time reconstruction
+
+    def forward(self, z):
+        # z: [B, D]
+        recon = self.lin(z)  # [B, T]
+        return recon.unsqueeze(1)  # [B, 1, T]
+
+# ---------------------------
+# Dual-stream model
+# ---------------------------
+
+class DualStreamModel(nn.Module):
+    def __init__(self, seq_len=5000, d_model=128):
+        super().__init__()
+        # encoders
+        self.ecg_front = ConvFrontEnd(in_channels=1, hidden_channels=64)
+        self.ppg_front = ConvFrontEnd(in_channels=1, hidden_channels=64)
+        # project conv output to d_model per time-step
+        self.proj_ecg = nn.Conv1d(64, d_model, kernel_size=1)
+        self.proj_ppg = nn.Conv1d(64, d_model, kernel_size=1)
+        # transformer encoders (operating on tokens/time-steps)
+        self.trans_ecg = SimpleTransformerEncoder(d_model=d_model, num_layers=4)
+        self.trans_ppg = SimpleTransformerEncoder(d_model=d_model, num_layers=4)
+        # pooling heads for contrastive
+        self.pool_ecg = TimePooling(d_model)
+        self.pool_ppg = TimePooling(d_model)
+        # decoders for masked reconstruction (use pooled context + optional upsampling)
+        self.dec_ecg = WaveDecoder(in_dim=d_model, out_channels=1, seq_len=seq_len)
+        self.dec_ppg = WaveDecoder(in_dim=d_model, out_channels=1, seq_len=seq_len)
+
+    def forward(self, ecg, ppg, mask_ecg=None, mask_ppg=None):
+        # ecg, ppg: [B, 1, T]
+        B, _, T = ecg.shape
+        # front-end convs
+        fe_ecg = self.ecg_front(ecg)[:, :64, :T]  # [B, C, T]
+        fe_ppg = self.ppg_front(ppg)[:, :64, :T]
+        # proj to model dim
+        z_ecg = self.proj_ecg(fe_ecg).permute(0, 2, 1)  # [B, T, D]
+        z_ppg = self.proj_ppg(fe_ppg).permute(0, 2, 1)
+        # optional masking: for masked modeling we can zero tokens in z or replace with learnable mask token
+        if mask_ecg is not None:
+            z_ecg = z_ecg.masked_fill(mask_ecg.unsqueeze(-1), 0.0)
+        if mask_ppg is not None:
+            z_ppg = z_ppg.masked_fill(mask_ppg.unsqueeze(-1), 0.0)
+        # transformer encoder
+        out_ecg = self.trans_ecg(z_ecg)  # [B, T, D]
+        out_ppg = self.trans_ppg(z_ppg)
+        # pooled embeddings for contrastive
+        pooled_ecg = self.pool_ecg(out_ecg)  # [B, D]
+        pooled_ppg = self.pool_ppg(out_ppg)
+        # decoders reconstruct full waveform from pooled embedding (simple)
+        recon_ecg = self.dec_ecg(pooled_ecg)  # [B, 1, T]
+        recon_ppg = self.dec_ppg(pooled_ppg)
+        return {
+            'ecg_tokens': out_ecg,
+            'ppg_tokens': out_ppg,
+            'pool_ecg': pooled_ecg,
+            'pool_ppg': pooled_ppg,
+            'recon_ecg': recon_ecg,
+            'recon_ppg': recon_ppg
+        }
+
+# ---------------------------
+# Training loop (example)
+# ---------------------------
+
+def train_epoch(model, dataloader, optim, device,
+                mask_patch_size=16, mask_ratio=0.25,
+                alpha_recon=1.0, alpha_contrast=1.0):
+    model.train()
+    total_loss = 0.0
+    for batch in dataloader:
+        ecg = batch['ecg'].to(device)  # [B,1,T]
+        ppg = batch['ppg'].to(device)
+        B, C, T = ecg.shape
+        # make masks
+        mask_e = patch_mask(ecg, patch_size=mask_patch_size, mask_ratio=mask_ratio)
+        mask_p = patch_mask(ppg, patch_size=mask_patch_size, mask_ratio=mask_ratio)
+        # forward with masked tokens (we pass masks for token zeroing inside model)
+        out = model(ecg, ppg, mask_ecg=mask_e, mask_ppg=mask_p)
+        # reconstruction targets: only compute MSE on masked positions
+        recon_ecg = out['recon_ecg']  # [B,1,T]
+        recon_ppg = out['recon_ppg']
+        # MSE on masked timepoints
+        mask_e_f = mask_e.unsqueeze(1).float()
+        mask_p_f = mask_p.unsqueeze(1).float()
+        # avoid dividing by zero
+        eps = 1e-6
+        loss_recon_ecg = ( ((recon_ecg - ecg)**2) * mask_e_f ).sum() / (mask_e_f.sum() + eps)
+        loss_recon_ppg = ( ((recon_ppg - ppg)**2) * mask_p_f ).sum() / (mask_p_f.sum() + eps)
+        loss_recon = loss_recon_ecg + loss_recon_ppg
+        # contrastive loss on pooled embeddings
+        z_ecg = out['pool_ecg']
+        z_ppg = out['pool_ppg']
+        loss_contrast = nt_xent_loss(z_ecg, z_ppg, temperature=0.1)
+        loss = alpha_recon * loss_recon + alpha_contrast * loss_contrast
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
+        total_loss += loss.item() * B
+    return total_loss / len(dataloader.dataset)
+
+# ---------------------------
+# Example usage
+# ---------------------------
+
+if __name__ == "__main__":
+    # Dummy index: replace with actual waveform windows
+    import numpy as np
+    N = 2000
+    T = 4096
+    dummy_index = []
+    for i in range(N):
+        # random noise + sinusoid as toy example
+        t = np.linspace(0, 1, T)
+        ecg = 0.1 * np.random.randn(T) + 0.5 * np.sin(2 * math.pi * 5 * t)  # toy
+        ppg = 0.05 * np.random.randn(T) + 0.3 * np.sin(2 * math.pi * 1.2 * t + 0.2)  # toy slower
+        dummy_index.append((ecg, ppg))
+
+    dataset = ECGPPGWindowDataset(dummy_index, window_size=T)
+    dataloader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=2, drop_last=True)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = DualStreamModel(seq_len=T, d_model=128).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+
+    for epoch in range(10):
+        loss = train_epoch(model, dataloader, optimizer, device,
+                           mask_patch_size=16, mask_ratio=0.25,
+                           alpha_recon=1.0, alpha_contrast=1.0)
+        print(f"Epoch {epoch:02d} loss: {loss:.4f}")
+
+# ---------------------------
+# Notes and next steps:
+# - Replace toy dataset with properly preprocessed MIMIC/Pitt windows (synchronized ECG/PPG).
+# - Add auxiliary heads: R-peak detection, HR/PTT regression using aligned beat annotations.
+# - Replace simple decoder by per-token decoder to reconstruct only masked tokens (more MAE-like).
+# - Consider multi-resolution: coarse + fine decoders to preserve morphology and microstructure.
+# - Consider adding augmentations: amplitude scaling, time-warp, additive noise, channel drop.
+# - After pretraining, freeze or fine-tune encoders when training downstream tasks (diagnosis, generation).
+```
+
+Results saved to /Volumes/Personal/VScode_github/tc_QA_model/Output/answer (format=txt)
+
+Job completed.
+
