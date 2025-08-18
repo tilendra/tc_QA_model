@@ -24,7 +24,7 @@ def ask_questions_with_context(
     api_key: str,
     questions: List[str],
     context: Optional[str] = None,
-    model: str = "gpt-4o",
+    model: str = "gpt-4o-mini",
     temperature: float = 0.3
 ) -> List[str]:
     """
