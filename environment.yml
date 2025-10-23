@@ -30,3 +30,8 @@ dependencies:
     - setuptools>=65.0.0
     - wheel
     - tkinterdnd2                         # drag-and-drop for tkinter
+    - langchain>=1.0.2                    # LangChain framework
+    - langchain-openai>=1.0.1              # LangChain OpenAI integration
+    - langchain-community>=0.4             # LangChain Community modules
+    - chromadb>=1.2.1                     # Chroma vector store
+    - langchain-text-splitters>=1.0.0  # text splitters for LangChain

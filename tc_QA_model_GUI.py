@@ -12,6 +12,12 @@ except Exception:
     # Placeholder - user must install openai package or adapt to their client lib.
     OpenAI = None
 
+# Optional Anthropic/Claude client import (best-effort)
+try:
+    from anthropic import Anthropic
+except Exception:
+    Anthropic = None
+
 try:
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
@@ -96,24 +102,34 @@ def ask_questions_with_context(
             os.environ["MISTRAL_API_KEY"] = api_key
         elif provider_norm == "llama":
             os.environ["LLAMA_API_KEY"] = api_key
+        elif provider_norm == "claude":
+            # Anthropic/Claude expects ANTHROPIC_API_KEY environment variable for many SDKs
+            os.environ["ANTHROPIC_API_KEY"] = api_key
         else:
             # default fallback
             os.environ["API_KEY"] = api_key
 
-    if provider_norm != "openai":
-        # We deliberately allow environment variable supply for other providers, but we don't
-        # attempt to call their SDKs here (SDKs / local runtimes differ widely).
-        cb("info", f"Provider '{provider_norm}' selected. API key exported to environment; to use this provider natively, integrate its SDK/client and call it where OpenAI client is used.")
-        # For safety, continue only if OpenAI client exists and provider is openai.
-        # If user selected a non-openai provider but still has OpenAI client and wishes to use it,
-        # we won't block them here; the code below will still try to use OpenAI if available.
-        # Otherwise, we will raise helpful message below when OpenAI client is not available.
+    # Instantiate a client for the selected provider when possible. This supports OpenAI natively
+    # and Claude/Anthropic if the `anthropic` package is installed. For other providers we export
+    # the API key and provide guidance to the user to integrate their SDK.
     if provider_norm == "openai":
         if OpenAI is None:
             cb("info", "Error: OpenAI client not available. Install and configure the openai package.")
             raise RuntimeError("OpenAI client not available")
-
         client = OpenAI(api_key=api_key)
+    elif provider_norm == "claude":
+        if Anthropic is None:
+            cb("info", "Error: Anthropic/Claude client not available. Install the 'anthropic' package to use Claude via Python.")
+            raise RuntimeError("Anthropic client not available")
+        # Try to instantiate with api_key argument if supported, otherwise rely on env var
+        try:
+            try:
+                client = Anthropic(api_key=api_key)
+            except TypeError:
+                client = Anthropic()
+        except Exception:
+            cb("info", "Warning: Failed to instantiate Anthropic client; falling back to env-var based instantiation.")
+            client = Anthropic()
     else:
         # Non-OpenAI providers: we do not implement provider SDK calls inline by default.
         # If the user has a custom client integration, they can modify this section to
@@ -231,14 +247,38 @@ def ask_questions_with_context(
                 cb("info", "Request cancelled by user during retries.")
                 break
             try:
-                # Note: This code uses the OpenAI client's chat completions signature implemented earlier.
-                # If you want to call Mistral / LLaMA SDKs, modify this block to switch on `provider`.
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature
-                )
-                response_text = response.choices[0].message.content.strip()
+                # Note: Branch behavior by provider. OpenAI client uses chat.completions.create.
+                # Anthropic/Claude uses completions.create with a single prompt string.
+                if provider_norm == "claude":
+                    # Build a simple prompt from the messages list
+                    prompt_parts = []
+                    for m in messages:
+                        role = m.get("role", "user")
+                        content = m.get("content", "")
+                        if role == "system":
+                            prompt_parts.append(f"System: {content}")
+                        elif role == "assistant":
+                            prompt_parts.append(f"Assistant: {content}")
+                        else:
+                            prompt_parts.append(f"User: {content}")
+                    prompt = "\n\n".join(prompt_parts)
+                    # Call Anthropic completions API (best-effort wrapper; may need adaptation per SDK version)
+                    resp = client.completions.create(model=model, prompt=prompt, max_tokens=2000, temperature=temperature)
+                    # Try to extract text from common response shapes
+                    if hasattr(resp, "completion"):
+                        response_text = resp.completion.strip()
+                    elif isinstance(resp, dict) and "completion" in resp:
+                        response_text = resp.get("completion", "").strip()
+                    else:
+                        response_text = str(resp).strip()
+                else:
+                    # Default: OpenAI-style chat completions
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=temperature
+                    )
+                    response_text = response.choices[0].message.content.strip()
                 break
             except Exception as e:
                 if attempt < max_retries:
@@ -290,6 +330,28 @@ class QAGui:
     ]
     LOCKED_TEMP_MODELS = {"gpt-5", "gpt-5-mini"}
 
+    # Provider-specific model presets. These are suggestions only; model names change over time.
+    # If a model you want is not listed, you can type it manually in the Model field.
+    MODEL_SETS = {
+        "openai": [
+            "gpt-5", "gpt-5-mini", "gpt-4o", "gpt-4o-mini", "gpt-4o-code", "gpt-3.5-turbo"
+        ],
+        "mistral": [
+            "mistral-1", "mistral-1-small"
+        ],
+        "llama": [
+            "llama-2-70b-chat", "llama-2-13b-chat", "llama-2-7b-chat"
+        ],
+        # Claude/Anthropic common options (examples). Update to match availability from Anthropic.
+        "claude": [
+            "claude-3-haiku-20240307",
+            "claude-3-opus-20240229",
+            "claude-3-sonnet-20240229",
+            "claude-2.1",
+            "claude-instant-1.2"
+        ]
+    }
+
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("Tilendra's QA Chatbot")
@@ -323,7 +385,8 @@ class QAGui:
         top_row.grid(row=0, column=0, sticky="ew", pady=(0,8))
         ttk.Label(top_row, text="Provider:").grid(row=0, column=0, sticky="w")
         self.provider_var = tk.StringVar(value="openai")
-        self.provider_box = ttk.Combobox(top_row, textvariable=self.provider_var, values=["openai", "mistral", "llama"], width=12, state="readonly")
+        # Allow provider change to dynamically update models; include 'claude'
+        self.provider_box = ttk.Combobox(top_row, textvariable=self.provider_var, values=["openai", "mistral", "llama", "claude"], width=12, state="readonly")
         self.provider_box.grid(row=0, column=1, sticky="w", padx=(4,8))
         self.provider_box.bind("<<ComboboxSelected>>", lambda e: self.on_provider_change())
 
@@ -335,7 +398,9 @@ class QAGui:
 
         ttk.Label(top_row, text="Model:").grid(row=0, column=4, sticky="w")
         self.model_var = tk.StringVar(value="gpt-4o-mini")
-        self.model_box = ttk.Combobox(top_row, textvariable=self.model_var, values=self.MODELS, width=22, state="readonly")
+        # Make combobox editable so users can type custom model names if desired
+        initial_models = self.MODEL_SETS.get("openai", self.MODELS)
+        self.model_box = ttk.Combobox(top_row, textvariable=self.model_var, values=initial_models, width=22, state="normal")
         self.model_box.grid(row=0, column=5, sticky="w", padx=(4,0))
         self.model_box.bind("<<ComboboxSelected>>", lambda e: self.on_model_change())
 
@@ -532,6 +597,8 @@ class QAGui:
             label_text = "API Key (Mistral):"
         elif provider == "llama":
             label_text = "API Key (LLaMA/local):"
+        elif provider == "claude":
+            label_text = "API Key (Claude/Anthropic):"
         # Find the label widget and update it (label has fixed grid position row=0 col=2)
         try:
             for child in self.root.children.values():
@@ -541,6 +608,65 @@ class QAGui:
         # Instead of searching, just update a small tooltip by setting entry's label via near widget
         # For simplicity, place a small text variable in the entry's widget tooltip is not available; so show an info in output.
         self.append_output("info", f"Provider set to '{provider}'. Place the provider API key in the API Key field; it will be exported to the environment variable for that provider when you run.")
+
+        # Update model list and default based on provider change
+        try:
+            models = self.MODEL_SETS.get(provider, self.MODELS)
+
+            # If provider is Claude and Anthropic SDK is available, attempt to fetch live model list.
+            if provider == "claude" and Anthropic is not None:
+                try:
+                    # Instantiate a short-lived client (try with provided API key first, then fall back to env var)
+                    ak = self.api_key_var.get().strip() or None
+                    try:
+                        live_client = Anthropic(api_key=ak) if ak else Anthropic()
+                    except TypeError:
+                        # Some versions may not accept api_key param
+                        live_client = Anthropic()
+
+                    live_models = None
+                    # Try a few common listing call patterns across SDK versions
+                    if hasattr(live_client, "models") and hasattr(live_client.models, "list"):
+                        resp = live_client.models.list()
+                        # resp may be a dict with 'data' or a list
+                        if isinstance(resp, dict) and "data" in resp:
+                            live_models = [m.get("id") or m.get("name") for m in resp.get("data", [])]
+                        elif isinstance(resp, list):
+                            live_models = [m.get("id") if isinstance(m, dict) else str(m) for m in resp]
+                    elif hasattr(live_client, "list_models"):
+                        resp = live_client.list_models()
+                        if isinstance(resp, dict) and "models" in resp:
+                            live_models = [m.get("id") or m.get("name") for m in resp.get("models", [])]
+                        elif isinstance(resp, list):
+                            live_models = [m.get("id") if isinstance(m, dict) else str(m) for m in resp]
+
+                    if live_models:
+                        # Filter out None and dedupe while preserving order
+                        seen = set()
+                        filtered = []
+                        for m in live_models:
+                            if not m:
+                                continue
+                            if m in seen:
+                                continue
+                            seen.add(m)
+                            filtered.append(m)
+                        if filtered:
+                            models = filtered
+                            self.append_output("info", f"Loaded {len(models)} Claude models from Anthropic SDK.")
+                except Exception as e:
+                    # Best-effort: do not fail; fallback to static presets
+                    self.append_output("info", f"Could not fetch Claude model list from Anthropic SDK: {e}. Using local presets.")
+
+            self.model_box.configure(values=models)
+            # Reset to first model in the new set if available
+            if models and (self.model_var.get() not in models):
+                try:
+                    self.model_var.set(models[0])
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def append_output(self, typ: str, text: str):
         # Insert into text widget; runs in main/UI thread.
@@ -729,6 +855,8 @@ class QAGui:
                         os.environ["MISTRAL_API_KEY"] = api_key
                     elif provider == "llama":
                         os.environ["LLAMA_API_KEY"] = api_key
+                    elif provider == "claude":
+                        os.environ["ANTHROPIC_API_KEY"] = api_key
                     else:
                         os.environ["API_KEY"] = api_key
 
