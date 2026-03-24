@@ -84,6 +84,12 @@ except ImportError:
     md_lib = None
     MARKDOWN_OK = False
 
+try:
+    from duckduckgo_search import DDGS
+    SEARCH_OK = True
+except ImportError:
+    SEARCH_OK = False
+
 # ── RAG stack ─────────────────────────────────────────────────────────────────
 try:
     from langchain_openai import OpenAIEmbeddings
@@ -121,40 +127,50 @@ st.set_page_config(
 # }
 
 ###
+# /* ── Chat messages ──────────────────────────────── */
 # .msg-user {
-#     background: linear-gradient(135deg, #1a2540, #1e2d50);
-#     border: 1px solid var(--accent2);
+#     background: linear-gradient(135deg, #1e293b, #1e3a5f);
+#     border: 1px solid rgba(59, 130, 246, 0.35); /* softer accent2 */
 #     border-radius: var(--radius);
 #     padding: 14px 18px;
 #     margin: 10px 0;
 #     position: relative;
+#     color: var(--text2);
 # }
+
 # .msg-user::before {
 #     content: "YOU";
 #     font-size: 0.65rem;
 #     font-weight: 700;
 #     letter-spacing: 0.1em;
-#     color: var(--accent2);
+#     color: #60a5fa; /* softer blue */
 #     display: block;
 #     margin-bottom: 6px;
 # }
+
 # .msg-ai {
-#     background: linear-gradient(135deg, #0f1e1a, #112020);
-#     border: 1px solid var(--accent);
+#     background: linear-gradient(135deg, #0f172a, #0f2a2a);
+#     border: 1px solid rgba(0, 212, 170, 0.35); /* softer accent */
 #     border-radius: var(--radius);
 #     padding: 14px 18px;
 #     margin: 10px 0;
+#     color: var(--text2);
 # }
+
 # .msg-ai::before {
 #     content: "TC·QA·Agent";
 #     font-size: 0.65rem;
 #     font-weight: 700;
 #     letter-spacing: 0.1em;
-#     color: var(--accent);
+#     color: #2dd4bf; /* softer teal */
 #     display: block;
 #     margin-bottom: 6px;
 # }
-# .msg-text { line-height: 1.7; font-size: 0.95rem; white-space: pre-wrap; }
+###
+
+###
+# .avatar-user { background: #1e3a5f; border: 1px solid #3b82f6; }
+# .avatar-ai   { background: #0f2a1a; border: 1px solid #00d4aa; }
 ###
 
 st.markdown("""
@@ -234,41 +250,71 @@ html, body, [class*="css"] {
 }
 
 /* ── Chat messages ──────────────────────────────── */
-.msg-user {
-    background: linear-gradient(135deg, #1e293b, #1e3a5f);
-    border: 1px solid rgba(59, 130, 246, 0.35); /* softer accent2 */
-    border-radius: var(--radius);
-    padding: 14px 18px;
+/* ── Chat layout wrappers ───────────────────────── */
+.msg-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
     margin: 10px 0;
-    position: relative;
-    color: var(--text2);
+}
+.msg-row.user-row {
+    flex-direction: row-reverse;  /* avatar on right */
 }
 
+/* ── Avatars ─────────────────────────────────────── */
+.avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+    flex-shrink: 0;
+    margin-top: 4px;
+}
+.avatar-user {
+    background: #e5e7eb;
+    border: 1px solid rgba(59, 130, 246, 0.6);
+}
+
+.avatar-ai {
+    background: #e5e7eb;
+    border: 1px solid rgba(0, 212, 170, 0.6);
+}
+
+/* ── Bubbles ─────────────────────────────────────── */
+.msg-user {
+    background: linear-gradient(135deg, #1e293b, #1e3a5f);
+    border: 1px solid rgba(59, 130, 246, 0.35);
+    border-radius: 16px 4px 16px 16px;  /* pointed top-right */
+    padding: 14px 18px;
+    max-width: 75%;
+    color: var(--text2);
+}
 .msg-user::before {
     content: "YOU";
     font-size: 0.65rem;
     font-weight: 700;
     letter-spacing: 0.1em;
-    color: #60a5fa; /* softer blue */
+    color: #60a5fa;
     display: block;
     margin-bottom: 6px;
 }
-
 .msg-ai {
     background: linear-gradient(135deg, #0f172a, #0f2a2a);
-    border: 1px solid rgba(0, 212, 170, 0.35); /* softer accent */
-    border-radius: var(--radius);
+    border: 1px solid rgba(0, 212, 170, 0.35);
+    border-radius: 4px 16px 16px 16px;  /* pointed top-left */
     padding: 14px 18px;
-    margin: 10px 0;
+    max-width: 75%;
     color: var(--text2);
 }
-
 .msg-ai::before {
     content: "TC·QA·Agent";
     font-size: 0.65rem;
     font-weight: 700;
     letter-spacing: 0.1em;
-    color: #2dd4bf; /* softer teal */
+    color: #2dd4bf;
     display: block;
     margin-bottom: 6px;
 }
@@ -526,6 +572,45 @@ def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
     return "[Unsupported file type]"
 
 
+def web_search(query: str, max_results: int = 5) -> str:
+    """Search the web using DuckDuckGo and return formatted results."""
+    if not SEARCH_OK:
+        return "[Web search unavailable — install duckduckgo-search]"
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        if not results:
+            return "[No results found]"
+        formatted = []
+        for i, r in enumerate(results, 1):
+            formatted.append(
+                f"[{i}] {r.get('title', 'No title')}\n"
+                f"URL: {r.get('href', '')}\n"
+                f"Summary: {r.get('body', '')}"
+            )
+        return "\n\n".join(formatted)
+    except Exception as e:
+        return f"[Search error: {e}]"
+
+
+def fetch_url(url: str, max_chars: int = 4000) -> str:
+    """Fetch and extract readable text from a URL."""
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=8)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        # Remove scripts and styles
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        # Collapse blank lines
+        lines = [l for l in text.splitlines() if l.strip()]
+        return "\n".join(lines)[:max_chars]
+    except Exception as e:
+        return f"[Failed to fetch URL: {e}]"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # RAG helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -587,12 +672,17 @@ TASK_SYSTEM_PROMPTS = {
         "well-structured summaries preserving key findings and numerical results."
     ),
     "Data Analyst": (
-        "You are a quantitative data analyst. Given structured data, produce Python code snippets, "
+        "You are a quantitative data analyst. Given data-related questions, structured data or time-course data visualizations, such as waveforms, charts, and graphs, produce Python code snippets, "
         "statistical summaries, or plain-language interpretations as requested."
     ),
     "RAG Assistant": (
         "You answer questions using ONLY the retrieved context provided. If the context is insufficient, "
         "say so clearly. Cite the source document when possible."
+    ),
+    "Resume Analyst": (
+        "You are a resume analyst. Given a resume and a job description, identify key skills, experience, and "
+        "qualifications. Provide a concise summary of the candidate's fit for the role, highlighting strengths and potential gaps."
+        "Generate the updated resume with improvements in a markdown code block."
     ),
 }
 
@@ -698,6 +788,28 @@ with st.sidebar:
     # ── Max tokens ────────────────────────────────────────────────────────────
     max_tokens = st.slider("Max tokens", 256, 4096, 1024, 128)
 
+    # # ── RAG ───────────────────────────────────────────────────────────────────
+    # st.markdown("---")
+    # st.markdown('<div class="card-label">📚 RAG Settings</div>', unsafe_allow_html=True)
+    # use_rag = st.toggle("Enable RAG", value=False, disabled=not RAG_OK,
+    #                     help="Retrieval-Augmented Generation using uploaded documents")
+    # if not RAG_OK:
+    #     st.caption("⚠️ Install langchain-openai, langchain-community, chromadb to enable RAG")
+
+    # # ✅ FIX 1: Auto-build RAG index if toggled ON and docs exist but store is not yet built
+    # if use_rag and RAG_OK and api_key and st.session_state["documents"] and st.session_state["rag_store"] is None:
+    #     with st.spinner("Building RAG index from loaded documents…"):
+    #         st.session_state["rag_store"] = build_rag_store(api_key, st.session_state["documents"])
+    #     if st.session_state["rag_store"]:
+    #         st.success("🔎 RAG index ready.")
+    #     else:
+    #         st.warning("RAG index build failed — check your OpenAI API key.")
+
+    # rag_k = st.slider("Top-k chunks", 1, 8, 4, 1, disabled=not use_rag)
+
+
+
+    ########
     # ── RAG ───────────────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown('<div class="card-label">📚 RAG Settings</div>', unsafe_allow_html=True)
@@ -706,7 +818,9 @@ with st.sidebar:
     if not RAG_OK:
         st.caption("⚠️ Install langchain-openai, langchain-community, chromadb to enable RAG")
 
-    # ✅ FIX 1: Auto-build RAG index if toggled ON and docs exist but store is not yet built
+    rag_k = st.slider("Top-k chunks", 1, 8, 4, 1, disabled=not use_rag)  # ← belongs here
+
+    # ✅ Auto-build RAG index if toggled ON and docs exist but store not yet built
     if use_rag and RAG_OK and api_key and st.session_state["documents"] and st.session_state["rag_store"] is None:
         with st.spinner("Building RAG index from loaded documents…"):
             st.session_state["rag_store"] = build_rag_store(api_key, st.session_state["documents"])
@@ -715,7 +829,18 @@ with st.sidebar:
         else:
             st.warning("RAG index build failed — check your OpenAI API key.")
 
-    rag_k = st.slider("Top-k chunks", 1, 8, 4, 1, disabled=not use_rag)
+    # ── Web Search ────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown('<div class="card-label">🌐 Web Search</div>', unsafe_allow_html=True)
+    use_web_search = st.toggle("Enable Web Search", value=False, disabled=not SEARCH_OK,
+                               help="Automatically search the web to answer questions")
+    if not SEARCH_OK:
+        st.caption("⚠️ Install duckduckgo-search to enable web search")
+    web_search_k = st.slider("Max results", 1, 8, 4, 1, disabled=not use_web_search)
+    #########
+
+    # ← sidebar ends here (dedent out of `with st.sidebar:`)
+
 
     # ── Memory ────────────────────────────────────────────────────────────────
     st.markdown("---")
@@ -754,11 +879,22 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # Header
 # ─────────────────────────────────────────────────────────────────────────────
+# st.markdown("""
+# <div class="tc-header">
+#     <div class="tc-logo">TC·QA·Agent</div>
+#     <div class="tc-subtitle">Time-Course Data Intelligence Platform</div>
+# </div>
+# """, unsafe_allow_html=True)
+
 st.markdown("""
 <div class="tc-header">
     <div class="tc-logo">TC·QA·Agent</div>
     <div class="tc-subtitle">Time-Course Data Intelligence Platform</div>
 </div>
+<p style="font-size:0.92rem; color:var(--muted); margin:-10px 0 20px 0; letter-spacing:0.01em;">
+    A web-based tool for interpreting text, data, code, images and documents using LLMs 
+    with <strong style="color:var(--accent);">7 expert assistants</strong>
+</p>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -805,13 +941,64 @@ with tab_chat:
 
     st.markdown("---")
 
+    
+    # # ── Chat history ─────────────────────────────────────────────────────────
+    # chat_container = st.container()
+    # with chat_container:
+    #     for msg in st.session_state["messages"]:
+    #         if msg["role"] == "user":
+    #             with st.chat_message("user", avatar="👤"):
+    #                 st.markdown(msg["content"])
+    #         else:
+    #             with st.chat_message("assistant", avatar="🤖"):
+    #                 # Show RAG source chips if any
+    #                 sources = msg.get("sources", [])
+    #                 if sources:
+    #                     src_html = " ".join(
+    #                         f'<span class="src-chip">📄 {s}</span>' for s in sources
+    #                     )
+    #                     st.markdown(src_html, unsafe_allow_html=True)
+    #                 st.markdown(msg["content"])
+    
+    # # ── Chat history ─────────────────────────────────────────────────────────
+    # chat_container = st.container()
+    # with chat_container:
+    #     for msg in st.session_state["messages"]:
+    #         if msg["role"] == "user":
+    #             st.markdown(
+    #                 f'<div class="msg-user"><div class="msg-text">{msg["content"]}</div></div>',
+    #                 unsafe_allow_html=True,
+    #             )
+    #         else:
+    #             src_html = ""
+    #             for s in msg.get("sources", []):
+    #                 src_html += f'<span class="src-chip">📄 {s}</span>'
+    #             st.markdown(
+    #                 f'<div class="msg-ai">{src_html + "<br>" if src_html else ""}'
+    #                 f'<div class="msg-text">',
+    #                 unsafe_allow_html=True,
+    #             )
+    #             st.markdown(msg["content"])   # ← native markdown: renders bullets, bold, code correctly
+    #             st.markdown('</div></div>', unsafe_allow_html=True)
+                
+    #             # st.markdown(
+    #             #     f'<div class="msg-ai">'
+    #             #     f'{src_html + "<br>" if src_html else ""}'
+    #             #     f'<div class="msg-text">{msg["content"]}</div>'
+    #             #     f'</div>',
+    #             #     unsafe_allow_html=True,
+    #             # )
+
     # ── Chat history ─────────────────────────────────────────────────────────
     chat_container = st.container()
     with chat_container:
         for msg in st.session_state["messages"]:
             if msg["role"] == "user":
                 st.markdown(
-                    f'<div class="msg-user"><div class="msg-text">{msg["content"]}</div></div>',
+                    f'<div class="msg-row user-row">'
+                    f'  <div class="avatar avatar-user">👤</div>'
+                    f'  <div class="msg-user"><div class="msg-text">{msg["content"]}</div></div>'
+                    f'</div>',
                     unsafe_allow_html=True,
                 )
             else:
@@ -819,27 +1006,22 @@ with tab_chat:
                 for s in msg.get("sources", []):
                     src_html += f'<span class="src-chip">📄 {s}</span>'
                 st.markdown(
-                    f'<div class="msg-ai">{src_html + "<br>" if src_html else ""}'
-                    f'<div class="msg-text">',
+                    f'<div class="msg-row">'
+                    f'  <div class="avatar avatar-ai">🧬</div>'
+                    f'  <div class="msg-ai">'
+                    f'    {src_html + "<br>" if src_html else ""}'
+                    f'    <div class="msg-text">',
                     unsafe_allow_html=True,
                 )
-                st.markdown(msg["content"])   # ← native markdown: renders bullets, bold, code correctly
-                st.markdown('</div></div>', unsafe_allow_html=True)
-                
-                # st.markdown(
-                #     f'<div class="msg-ai">'
-                #     f'{src_html + "<br>" if src_html else ""}'
-                #     f'<div class="msg-text">{msg["content"]}</div>'
-                #     f'</div>',
-                #     unsafe_allow_html=True,
-                # )
+                st.markdown(msg["content"])
+                st.markdown('</div></div></div>', unsafe_allow_html=True)
 
     # ── Input area ────────────────────────────────────────────────────────────
     st.markdown("")
     with st.form("chat_form", clear_on_submit=True):
         user_query = st.text_area(
             "Ask a question…",
-            placeholder="e.g., What does the lactate trend suggest about sepsis progression?\n"
+            placeholder="e.g., What does the blood pressure reading indicate?\n"
                         "Or paste code to interpret, data to summarise, etc.",
             height=100,
             label_visibility="collapsed",
@@ -900,6 +1082,19 @@ with tab_chat:
                         st.warning("⚠️ RAG index not built yet — using raw document text as fallback. "
                                    "Go to the Documents tab and click 'Rebuild RAG Index'.")
 
+                
+                # ── Web search and URL fetch ─────────────────────────────────────
+                if use_web_search:
+                    with st.spinner("🌐 Searching the web…"):
+                        search_results = web_search(user_query.strip(), max_results=web_search_k)
+                    system_content += f"\n\n--- WEB SEARCH RESULTS ---\n{search_results}"
+                    urls = re.findall(r'https?://[^\s\)\"\']+', user_query)
+                    for url in urls[:2]:
+                        page_text = fetch_url(url)
+                        system_content += f"\n\n--- FETCHED PAGE: {url} ---\n{page_text}"
+
+                
+                
                 # ── Build messages list ─────────────────────────────────────
                 chat_messages = [{"role": "system", "content": system_content}]
 
@@ -1146,7 +1341,7 @@ with tab_stats:
 st.markdown("---")
 st.markdown(
     '<div style="text-align:center;color:#334155;font-size:0.75rem;padding:8px 0;">'
-    'TC·QA·Agent · Time-Course Intelligence Platform · A Web-based tool for interpreting clinical time-series data, code, and documents using LLMs'
+    'Copyright © 2026 Tilendra Choudhary · TC·QA·Agent · Time-Course Intelligence Platform with 7 Assistants'
     '</div>',
     unsafe_allow_html=True,
 )

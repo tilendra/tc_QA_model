@@ -24,6 +24,12 @@ langchain-community>=0.2.0
 langchain-text-splitters>=0.2.0
 chromadb>=0.5.0
 
+
+# Web search (optional)
+duckduckgo-search>=6.0.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Quick start (minimal, no RAG):
 #   pip install streamlit openai anthropic PyPDF2 python-docx Pillow pandas markdown
