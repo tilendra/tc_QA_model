@@ -2,6 +2,9 @@
 
 This repository provides a Question Answering (QA) model designed to interpret and analyze time-course (TC) data, with a focus on clinical and physiological datasets. The model leverages large language models (LLMs) to answer user queries about time-series data, such as patient vital signs, laboratory results, and other clinical measurements.
 
+## Demonstration
+![Demo](demo.png)
+
 ## Features
 - **Interactive GUI**: A graphical user interface (`tc_QA_model_GUI.py`) for user-friendly interaction with the QA model.
 - **LLM Integration**: Utilizes LLMs to interpret and explain time-course data, including sepsis phenotypes and other clinical scenarios.
