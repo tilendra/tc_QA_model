@@ -1,0 +1,41 @@
+# TC·QA·Agent Streamlit App — Requirements
+# Install with: pip install -r requirements.txt
+
+# Core
+streamlit>=1.35.0
+pandas>=2.0.0
+markdown>=3.5.0
+
+# LLM providers (install the one(s) you need)
+openai>=1.30.0
+anthropic>=0.25.0
+
+# Document parsing
+PyPDF2>=3.0.0
+python-docx>=1.1.0
+Pillow>=10.0.0
+
+# OCR (optional — also requires Tesseract binary on PATH)
+# pytesseract>=0.3.10
+
+# RAG stack (optional — all three needed together)
+langchain-openai>=0.1.0
+langchain-community>=0.2.0
+langchain-text-splitters>=0.2.0
+chromadb>=0.5.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Quick start (minimal, no RAG):
+#   pip install streamlit openai anthropic PyPDF2 python-docx Pillow pandas markdown
+#
+# Full install (with RAG):
+#   pip install streamlit openai anthropic PyPDF2 python-docx Pillow pandas markdown \
+#               langchain-openai langchain-community langchain-text-splitters chromadb
+#
+# To enable OCR for image files:
+#   brew install tesseract          # macOS
+#   sudo apt install tesseract-ocr  # Ubuntu/Debian
+#   pip install pytesseract
+#
+# Run:
+#   streamlit run tc_qa_streamlit_app.py
