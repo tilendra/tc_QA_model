@@ -77,7 +77,12 @@ try:
 except ImportError:
     OCR_OK = False
 
-import markdown as md_lib
+try:
+    import markdown as md_lib
+    MARKDOWN_OK = True
+except ImportError:
+    md_lib = None
+    MARKDOWN_OK = False
 
 # ── RAG stack ─────────────────────────────────────────────────────────────────
 try:
