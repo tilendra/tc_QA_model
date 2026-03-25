@@ -35,3 +35,9 @@ dependencies:
     - langchain-community>=0.4             # LangChain Community modules
     - chromadb>=1.2.1                     # Chroma vector store
     - langchain-text-splitters>=1.0.0  # text splitters for LangChain
+    - ddgs>=6.0.0                        # DuckDuckGo search API
+    - beautifulsoup4>=4.12.0             # HTML parsing for web search results
+    - requests>=2.31.0                   # HTTP requests for web search and APIs
+    - streamlit>=1.35.0                   # Streamlit for the web app
+    - markdown>=3.5.0                     # Markdown rendering in Streamlit
+    - anthropic>=0.25.0                   # Anthropic python client (used in code)
