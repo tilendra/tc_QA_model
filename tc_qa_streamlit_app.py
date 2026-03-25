@@ -105,7 +105,7 @@ import pandas as pd
 # Page config & custom CSS
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="TC·QA·Agent — Time-Course Intelligence",
+    page_title="TC·QA·Agent — Time-Course Q&A Agent",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -175,6 +175,11 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+/* ── Force light mode regardless of system preference ── */
+html, body, [data-testid="stAppViewContainer"], 
+[data-testid="stHeader"], [data-testid="stToolbar"] {
+    color-scheme: light only !important;
+}             
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&family=Playfair+Display:wght@700;900&display=swap');
 
 /* ── Root variables ─────────────────────────────── */
@@ -610,6 +615,23 @@ def fetch_url(url: str, max_chars: int = 4000) -> str:
         return "\n".join(lines)[:max_chars]
     except Exception as e:
         return f"[Failed to fetch URL: {e}]"
+    
+def generate_image(api_key: str, prompt: str, size: str, quality: str) -> str:
+    """Generate an image with DALL·E 3, return the URL."""
+    if not OPENAI_OK:
+        return None, "OpenAI not installed."
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.images.generate(
+            model="dall-e-3",
+            prompt=prompt,
+            size=size,
+            quality=quality,
+            n=1,
+        )
+        return response.data[0].url, response.data[0].revised_prompt
+    except Exception as e:
+        return None, str(e)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RAG helpers
@@ -682,9 +704,16 @@ TASK_SYSTEM_PROMPTS = {
     "Resume Analyst": (
         "You are a resume analyst. Given a resume and a job description, identify key skills, experience, and "
         "qualifications. Provide a concise summary of the candidate's fit for the role, highlighting strengths and potential gaps."
-        "Generate the updated resume with improvements in a markdown code block."
+        "Generate the updated ATS-friendly resume with improvements in a plain text format (use bold and italics, if needed)."
+    ),
+    "Image Generator": (
+        "You are an expert at writing detailed, vivid DALL·E image generation prompts. "
+        "When the user describes an image, enhance their description into a detailed prompt "
+        "and confirm what image will be generated."
     ),
 }
+
+
 
 def call_llm(
     provider: str,
@@ -751,14 +780,15 @@ def export_conversation(messages: list, fmt: str) -> bytes:
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
+#background:linear-gradient(135deg,#00d4aa,#3b82f6);
 with st.sidebar:
     st.markdown("""
     <div style='padding:16px 0 12px;'>
-        <div style='font-family:"Playfair Display",serif;font-size:1.6rem;font-weight:900;
-                    background:linear-gradient(135deg,#00d4aa,#3b82f6);
+        <div style='font-family:"Playfair Display",serif;font-size:2.6rem;font-weight:900;
+                    background: linear-gradient(135deg, #f59e0b, #ef4444, #ec4899);
                     -webkit-background-clip:text;-webkit-text-fill-color:transparent;'>TC·QA·Agent</div>
         <div style='font-size:0.7rem;color:#64748b;letter-spacing:0.1em;text-transform:uppercase;'>
-            Time-Course Intelligence</div>
+            Time-Course Q&A Assistant</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -771,7 +801,7 @@ with st.sidebar:
         "LLM Provider", ["OpenAI", "Anthropic (Claude)"], label_visibility="collapsed"
     )
     provider_models = {
-        "OpenAI": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
+        "OpenAI": ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo", "dall-e-3"],
         "Anthropic (Claude)": ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5-20251001"],
     }
     model = st.selectbox("Model", provider_models[provider], label_visibility="collapsed")
@@ -837,6 +867,14 @@ with st.sidebar:
     if not SEARCH_OK:
         st.caption("⚠️ Install duckduckgo-search to enable web search")
     web_search_k = st.slider("Max results", 1, 8, 4, 1, disabled=not use_web_search)
+
+    # ── Image Generation ──────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown('<div class="card-label">🎨 Image Generation</div>', unsafe_allow_html=True)
+    img_size = st.selectbox("Size", ["1024x1024", "1792x1024", "1024x1792"],
+                            label_visibility="collapsed")
+    img_quality = st.selectbox("Quality", ["standard", "hd"],
+                            label_visibility="collapsed")
     #########
 
     # ← sidebar ends here (dedent out of `with st.sidebar:`)
@@ -888,13 +926,31 @@ with st.sidebar:
 
 st.markdown("""
 <div class="tc-header">
-    <div class="tc-logo">TC·QA·Agent</div>
-    <div class="tc-subtitle">Time-Course Data Intelligence Platform</div>
+    <div class="tc-logo" style="font-family:'Playfair Display',serif;font-size:3.6rem;font-weight:900;">TC·QA·Agent</div>
+    <div class="tc-subtitle" style="font-size:1.5rem;">Time-Course Data Intelligence Platform</div>
 </div>
-<p style="font-size:0.92rem; color:var(--muted); margin:-10px 0 20px 0; letter-spacing:0.01em;">
-    A web-based tool for interpreting text, data, code, images and documents using LLMs 
-    with <strong style="color:var(--accent);">7 expert assistants</strong>
+<p style="font-size:1.1rem; color:var(--muted); margin:-10px 0 20px 0; letter-spacing:0.01em;">
+    A web-based tool with advanced Q&A systems for interpreting text, data, code, images and documents using LLMs 
+    with 8 expert assistants accessible via <strong style="color:var(--accent);">Task Mode</strong>, plus RAG, multi-modal document ingestion, web search,
+    multi-provider LLM support, conversation memory, and export capabilities.
 </p>
+
+<div style="margin-bottom:18px;">
+    <div style="font-size:1.2rem; font-weight:700; margin-bottom:6px; color:var(--text);">Assistants</div>
+    <div class="card" style="padding:10px;">
+        <ul style="margin:0; padding-left:20px; color:var(--muted);">
+            <li><strong>General QA — </strong> Ask anything — general knowledge, science, concepts, or open-ended questions.</li>
+            <li><strong>Clinical Analyst — </strong> Interpret healthcare data, vital signs, lab trends, diseases, and physiological time-series.</li>
+            <li><strong>Code Interpreter — </strong> Explain, debug, optimize, or rewrite code snippets in any language.</li>
+            <li><strong>Summarizer — </strong> Condense long documents, papers, or reports into concise structured summaries.</li>
+            <li><strong>Data Analyst — </strong> Analyze structured data, generate Python code, and extract statistical insights.</li>
+            <li><strong>RAG Assistant — </strong> Answer questions grounded strictly in your uploaded documents.</li>
+            <li><strong>Resume Analyst — </strong> Review, critique, and improve resumes for clarity, impact, and ATS compatibility.</li>
+            <li><strong>Image Generator — </strong> Create detailed DALL·E prompts to generate vivid images from your descriptions.</li>
+        </ul>
+    </div>
+</div>
+
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1083,7 +1139,7 @@ with tab_chat:
                                    "Go to the Documents tab and click 'Rebuild RAG Index'.")
 
                 
-                # ── Web search and URL fetch ─────────────────────────────────────
+                # ── Web search and URL fetch ──────────────────────────────
                 if use_web_search:
                     with st.spinner("🌐 Searching the web…"):
                         search_results = web_search(user_query.strip(), max_results=web_search_k)
@@ -1093,43 +1149,63 @@ with tab_chat:
                         page_text = fetch_url(url)
                         system_content += f"\n\n--- FETCHED PAGE: {url} ---\n{page_text}"
 
-                
-                
-                # ── Build messages list ─────────────────────────────────────
-                chat_messages = [{"role": "system", "content": system_content}]
+                # ── Image generation (DALL·E 3) ───────────────────────────
+                if model == "dall-e-3" or task_mode == "Image Generator":
+                    with st.spinner("🎨 Generating image…"):
+                        img_url, revised_prompt = generate_image(
+                            api_key, user_query.strip(), img_size, img_quality
+                        )
+                    if img_url:
+                        st.session_state["messages"].append({
+                            "role": "assistant",
+                            "content": f"**Revised prompt used:**\n_{revised_prompt}_\n\n![Generated Image]({img_url})\n\n[⬇ Download image]({img_url})",
+                            "sources": [],
+                            "image_url": img_url,
+                        })
+                    else:
+                        st.session_state["messages"].append({
+                            "role": "assistant",
+                            "content": f"❌ Image generation failed: {revised_prompt}",
+                            "sources": [],
+                        })
+                    st.session_state["history"].append(f"Q: {user_query.strip()}\nA: [Image generated]")
 
-                if carry_history:
-                    history = st.session_state["messages"][-(max_history * 2 + 1):-1]
-                    for h in history:
-                        chat_messages.append({"role": h["role"], "content": h["content"]})
+                else:  # ← normal LLM path, only runs if NOT image generation
+                    # ── Build messages list ───────────────────────────────
+                    chat_messages = [{"role": "system", "content": system_content}]
 
-                chat_messages.append({"role": "user", "content": user_query.strip()})
+                    if carry_history:
+                        history = st.session_state["messages"][-(max_history * 2 + 1):-1]
+                        for h in history:
+                            chat_messages.append({"role": h["role"], "content": h["content"]})
 
-                # ── Call LLM ────────────────────────────────────────────────
-                try:
-                    answer = call_llm(
-                        provider=provider,
-                        api_key=api_key,
-                        model=model,
-                        messages=chat_messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    )
-                    st.session_state["messages"].append({
-                        "role": "assistant",
-                        "content": answer,
-                        "sources": rag_sources,
-                    })
-                    st.session_state["history"].append(
-                        f"Q: {user_query.strip()}\nA: {answer}"
-                    )
-                except Exception as e:
-                    err = f"**Error calling {provider}:** {e}\n\n```\n{traceback.format_exc()}\n```"
-                    st.session_state["messages"].append({
-                        "role": "assistant", "content": err, "sources": []
-                    })
+                    chat_messages.append({"role": "user", "content": user_query.strip()})
 
-            st.rerun()
+                    # ── Call LLM ──────────────────────────────────────────
+                    try:
+                        answer = call_llm(
+                            provider=provider,
+                            api_key=api_key,
+                            model=model,
+                            messages=chat_messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                        )
+                        st.session_state["messages"].append({
+                            "role": "assistant",
+                            "content": answer,
+                            "sources": rag_sources,
+                        })
+                        st.session_state["history"].append(
+                            f"Q: {user_query.strip()}\nA: {answer}"
+                        )
+                    except Exception as e:
+                        err = f"**Error calling {provider}:** {e}\n\n```\n{traceback.format_exc()}\n```"
+                        st.session_state["messages"].append({
+                            "role": "assistant", "content": err, "sources": []
+                        })
+
+            st.rerun()  # ← single rerun at the end covers both paths
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1341,7 +1417,7 @@ with tab_stats:
 st.markdown("---")
 st.markdown(
     '<div style="text-align:center;color:#334155;font-size:0.75rem;padding:8px 0;">'
-    'Copyright © 2026 Tilendra Choudhary · TC·QA·Agent · Time-Course Intelligence Platform with 7 Assistants'
+    'Copyright © 2026 Tilendra Choudhary · TC·QA·Agent · Time-Course Intelligence Platform with 8 Assistants'
     '</div>',
     unsafe_allow_html=True,
 )
