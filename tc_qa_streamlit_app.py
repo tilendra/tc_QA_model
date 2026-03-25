@@ -387,7 +387,7 @@ html, body, [class*="css"] {
 
 /* ── Sidebar overrides ───────────────────────────── */
 [data-testid="stSidebar"] {
-    background: var(--bg2) !important;
+    background: var(--bg) !important;
     border-right: 1px solid var(--border) !important;
 }
 [data-testid="stSidebar"] .stTextInput > div > div > input,
@@ -702,9 +702,16 @@ TASK_SYSTEM_PROMPTS = {
         "say so clearly. Cite the source document when possible."
     ),
     "Resume Analyst": (
-        "You are a resume analyst. Given a resume and a job description, identify key skills, experience, and "
-        "qualifications. Provide a concise summary of the candidate's fit for the role, highlighting strengths and potential gaps."
-        "Generate the updated ATS-friendly resume with improvements in a plain text format (use bold and italics, if needed)."
+        "You are an expert resume analyst and career coach specializing in ATS optimization. "
+        "When given a resume (and optionally a job description), you must do the following:\n\n"
+        "1. **Fit Analysis**: Identify key skills, experience, and qualifications. Summarize the "
+        "candidate's strengths and gaps relative to the role.\n"
+        "2. **ATS Score**: Estimate an ATS compatibility score (0–100) and explain what is hurting it.\n"
+        "3. **Improvement Suggestions**: List specific, actionable improvements for wording, structure, "
+        "keywords, and formatting.\n"
+        "4. **Updated Resume**: Rewrite the full resume in clean markdown format using "
+        "**bold** for section headers and job titles, and *italics* for dates and locations. "
+        "Optimize for ATS keyword matching based on the job description if provided."
     ),
     "Image Generator": (
         "You are an expert at writing detailed, vivid DALL·E image generation prompts. "
@@ -788,7 +795,7 @@ with st.sidebar:
                     background: linear-gradient(135deg, #f59e0b, #ef4444, #ec4899);
                     -webkit-background-clip:text;-webkit-text-fill-color:transparent;'>TC·QA·Agent</div>
         <div style='font-size:0.7rem;color:#64748b;letter-spacing:0.1em;text-transform:uppercase;'>
-            Time-Course Q&A Assistant</div>
+            <strong style="color:var(--accent); font-size:0.9rem;">Time-Course Q&A Assistant</strong></div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -865,7 +872,7 @@ with st.sidebar:
     use_web_search = st.toggle("Enable Web Search", value=False, disabled=not SEARCH_OK,
                                help="Automatically search the web to answer questions")
     if not SEARCH_OK:
-        st.caption("⚠️ Install duckduckgo-search to enable web search")
+        st.caption("⚠️ Install ddgs to enable web search")
     web_search_k = st.slider("Max results", 1, 8, 4, 1, disabled=not use_web_search)
 
     # ── Image Generation ──────────────────────────────────────────────────────
@@ -929,24 +936,34 @@ st.markdown("""
     <div class="tc-logo" style="font-family:'Playfair Display',serif;font-size:3.6rem;font-weight:900;">TC·QA·Agent</div>
     <div class="tc-subtitle" style="font-size:1.5rem;">Time-Course Data Intelligence Platform</div>
 </div>
-<p style="font-size:1.1rem; color:var(--muted); margin:-10px 0 20px 0; letter-spacing:0.01em;">
+<p style="font-size:1.1rem; color:var(--text); margin:-10px 0 20px 0; letter-spacing:0.01em;">
     A web-based tool with advanced Q&A systems for interpreting text, data, code, images and documents using LLMs 
-    with 8 expert assistants accessible via <strong style="color:var(--accent);">Task Mode</strong>, plus RAG, multi-modal document ingestion, web search,
-    multi-provider LLM support, conversation memory, and export capabilities.
+    with 8 expert assistants, as per the requirements, accessible via <strong style="color:var(--accent);">Task Mode</strong>, plus RAG, multi-modal document ingestion, web search,
+    multi-provider LLM support, conversation memory, and export capabilities. 
 </p>
+            
+<p style="font-size:1rem; color:var(--text); margin-bottom:24px; padding:12px 16px; background:var(--bg3); border-radius:8px;">
+    <strong style="font-size:1.3rem;">Instructions</strong>: Put your <strong style="color:var(--accent);">API Key</strong> in the sidebar to connect to the LLM. 
+    Select a <strong style="color:var(--accent);">TASK MODE</strong> from the sidebar, then ask questions in the <strong style="color:var(--accent);">CHAT tab</strong>. 
+    Upload documents in the <strong style="color:var(--accent);">DOCUMENTS tab</strong> to enable RAG retrieval. Use toggles to enable <strong style="color:var(--accent);">RAG</strong> and 
+    <strong style="color:var(--accent);">web search</strong> for enhanced answers. 
+    Put texual context in the <strong style="color:var(--accent);">CONTEXT tab</strong> to provide additional info for the assistant.
+    Use the <strong style="color:var(--accent);">STATS tab</strong> to see insights about your conversation and uploaded documents. <strong style="color:var(--accent);">EXPORT</strong> your conversation in various formats from the sidebar.
+</p>
+
 
 <div style="margin-bottom:18px;">
     <div style="font-size:1.2rem; font-weight:700; margin-bottom:6px; color:var(--text);">Assistants</div>
     <div class="card" style="padding:10px;">
-        <ul style="margin:0; padding-left:20px; color:var(--muted);">
-            <li><strong>General QA — </strong> Ask anything — general knowledge, science, concepts, or open-ended questions.</li>
+        <ul style="margin:0; padding-left:20px; color:var(--text);">
+            <li><strong>General QA — </strong> Ask anything — general knowledge, science, concepts, or open-ended questions. (<strong>Best if Enable RAG toggle ON</strong>)</li>
             <li><strong>Clinical Analyst — </strong> Interpret healthcare data, vital signs, lab trends, diseases, and physiological time-series.</li>
             <li><strong>Code Interpreter — </strong> Explain, debug, optimize, or rewrite code snippets in any language.</li>
             <li><strong>Summarizer — </strong> Condense long documents, papers, or reports into concise structured summaries.</li>
             <li><strong>Data Analyst — </strong> Analyze structured data, generate Python code, and extract statistical insights.</li>
-            <li><strong>RAG Assistant — </strong> Answer questions grounded strictly in your uploaded documents.</li>
-            <li><strong>Resume Analyst — </strong> Review, critique, and improve resumes for clarity, impact, and ATS compatibility.</li>
-            <li><strong>Image Generator — </strong> Create detailed DALL·E prompts to generate vivid images from your descriptions.</li>
+            <li><strong>RAG Assistant — </strong> Answer questions grounded strictly in your uploaded documents. (<strong>Best if Enable RAG toggle ON</strong>)</li>
+            <li><strong>Resume Analyst — </strong> Review, critique, and improve resumes for clarity, impact, and ATS compatibility. (<strong>Best if Enable RAG toggle ON</strong>)</li>
+            <li><strong>Image Generator — </strong> Create detailed DALL·E prompts to generate vivid images from your descriptions. (<strong>Best if use DALL·E 3</strong>)</li>
         </ul>
     </div>
 </div>
