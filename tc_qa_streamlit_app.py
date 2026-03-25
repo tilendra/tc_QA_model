@@ -85,7 +85,7 @@ except ImportError:
     MARKDOWN_OK = False
 
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
     SEARCH_OK = True
 except ImportError:
     SEARCH_OK = False
