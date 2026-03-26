@@ -675,11 +675,20 @@ def retrieve_rag_context(store, query: str, k: int = 4) -> tuple[str, list]:
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM call
 # ─────────────────────────────────────────────────────────────────────────────
+# UNIVERSAL_AGENT_PROMPT = (
+# "You are part of a multi-agent AI system coordinated by an orchestrator. "
+# "Be precise, structured, and task-focused. "
+# "Do not hallucinate. If information is missing or uncertain, state it clearly. "
+# "Prefer structured outputs when applicable so other agents can consume your response. "
+# "Avoid unnecessary verbosity."
+# )
+
+
 TASK_SYSTEM_PROMPTS = {
     "General QA": (
-        "You are TC·QA·Agent, an expert assistant specializing in time-course data interpretation, "
-        "clinical data analysis, physiological measurements, and biomedical research. "
-        "Answer concisely, precisely, and with scientific rigor."
+        "You are a general-purpose expert assistant with additional expertise in time-course data interpretation. "
+        "Answer clearly and accurately across domains. Adapt depth based on the question. "
+        "If uncertain, state that information is unavailable."
     ),
     "Clinical Analyst": (
         "You are a clinical data analyst with deep expertise in ICU data, sepsis, shock, phenotyping, physiological waveforms, "
