@@ -519,13 +519,12 @@ hr  { border-color: var(--border) !important; }
 # ─────────────────────────────────────────────────────────────────────────────
 def _init_state():
     defaults = {
-        "messages":        [],
-        "documents":       [],
-        "rag_store":       None,
-        "rag_texts":       [],
-        "history":         [],
+        "messages":        [],      # [{role, content, sources}]
+        "documents":       [],      # [{name, text, size_kb}]
+        "rag_store":       None,    # Chroma instance
+        "rag_texts":       [],      # raw chunk list for stats
+        "history":         [],      # plain Q&A strings
         "export_buf":      None,
-        "manual_context":  "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -732,104 +731,6 @@ TASK_SYSTEM_PROMPTS = {
 
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Multi-Agent Orchestrator
-# ─────────────────────────────────────────────────────────────────────────────
-
-MULTI_AGENT_ROSTER = [
-    "General QA", "Clinical Analyst", "Code Interpreter",
-    "Summarizer", "Data Analyst", "RAG Assistant", "Resume Analyst",
-]
-
-ORCHESTRATOR_PROMPT = """You are a master orchestrator for TC·QA·Agent.
-Analyse the user query and decide which specialist agents should handle it.
-
-Available agents:
-- General QA       : general knowledge, open-ended, factual queries
-- Clinical Analyst : ICU vitals, sepsis, labs, physiological time-series
-- Code Interpreter : code explanation, debugging, Python scripting
-- Summarizer       : condensing documents, papers, long text
-- Data Analyst     : structured data, statistics, chart/analysis code
-- RAG Assistant    : questions grounded in uploaded documents
-- Resume Analyst   : resume review, ATS scoring, career advice
-
-Rules:
-1. Select ONLY agents genuinely needed (1-3 max).
-2. Order them by execution sequence (first agent feeds context to next).
-3. Return ONLY a valid JSON array of agent names, nothing else.
-
-Examples:
-["Clinical Analyst", "Data Analyst"]
-["General QA"]
-["RAG Assistant", "Summarizer"]
-
-User query: {query}
-"""
-
-
-def orchestrate(api_key: str, provider: str, model: str, query: str,
-                call_llm_fn) -> list:
-    """Ask orchestrator which agents to invoke. Returns list of agent names."""
-    prompt = ORCHESTRATOR_PROMPT.format(query=query)
-    try:
-        raw = call_llm_fn(
-            provider=provider, api_key=api_key, model=model,
-            messages=[
-                {"role": "system", "content": "You are an orchestrator. Reply ONLY with a JSON array."},
-                {"role": "user",   "content": prompt},
-            ],
-            temperature=0.0, max_tokens=150,
-        )
-        match = re.search(r'\[.*?\]', raw, re.DOTALL)
-        if match:
-            agents = json.loads(match.group())
-            agents = [a for a in agents if a in MULTI_AGENT_ROSTER]
-            return agents if agents else ["General QA"]
-        return ["General QA"]
-    except Exception:
-        return ["General QA"]
-
-
-def run_multi_agent_pipeline(
-    api_key: str, provider: str, model: str, query: str,
-    agents: list, base_system: str, temperature: float,
-    max_tokens: int, call_llm_fn,
-) -> tuple:
-    """Run agents sequentially; each builds on previous output."""
-    accumulated_context = base_system
-    agent_outputs = []
-
-    for agent_name in agents:
-        agent_prompt = TASK_SYSTEM_PROMPTS.get(agent_name, TASK_SYSTEM_PROMPTS["General QA"])
-        system_content = (
-            f"{agent_prompt}\n\n"
-            f"You are agent [{agent_name}] in a multi-agent pipeline. "
-            f"Prior agent output (use as context):\n\n{accumulated_context}"
-        )
-        try:
-            output = call_llm_fn(
-                provider=provider, api_key=api_key, model=model,
-                messages=[
-                    {"role": "system", "content": system_content},
-                    {"role": "user",   "content": query},
-                ],
-                temperature=temperature, max_tokens=max_tokens,
-            )
-        except Exception as e:
-            output = f"[{agent_name} failed: {e}]"
-
-        agent_outputs.append({"agent": agent_name, "output": output})
-        accumulated_context += f"\n\n--- [{agent_name}] output ---\n{output}"
-
-    if len(agent_outputs) == 1:
-        final = agent_outputs[0]["output"]
-    else:
-        sections = [f"### 🤖 {ao['agent']}\n\n{ao['output']}" for ao in agent_outputs]
-        final = "\n\n---\n\n".join(sections)
-
-    return final, agent_outputs
-
-
 def call_llm(
     provider: str,
     api_key: str,
@@ -903,7 +804,7 @@ with st.sidebar:
                     background: linear-gradient(135deg, #f59e0b, #ef4444, #ec4899);
                     -webkit-background-clip:text;-webkit-text-fill-color:transparent;'>TC·QA·Agent</div>
         <div style='font-size:0.7rem;color:#64748b;letter-spacing:0.1em;text-transform:uppercase;'>
-            <strong style="color:var(--accent); font-size:0.9rem;">Time-Course Q&A Agent</strong></div>
+            <strong style="color:var(--accent); font-size:0.9rem;">Time-Course Q&A Assistant</strong></div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -924,46 +825,7 @@ with st.sidebar:
 
     # ── Task Mode ─────────────────────────────────────────────────────────────
     st.markdown('<div class="card-label" style="margin-top:14px;">⚙️ Task Mode</div>', unsafe_allow_html=True)
-
-    # ── MultiAgent toggle ─────────────────────────────────────────────────────
-    multi_agent_mode = st.toggle(
-        "🧠 MultiAgent Mode",
-        value=False,
-        help="ON: Orchestrator auto-selects and chains multiple agents.\nOFF: You pick a single agent manually.",
-    )
-
-    if multi_agent_mode:
-        st.markdown(
-            '<div style="background:linear-gradient(135deg,#0f2a1a,#0f1a2a);'
-            'border:1px solid #2dd4bf;border-radius:8px;padding:10px 14px;margin:6px 0;">'
-            '<span style="color:#2dd4bf;font-size:0.75rem;font-weight:700;letter-spacing:0.08em;">'
-            '🤖 ORCHESTRATOR ACTIVE</span><br>'
-            '<span style="color:#94a3b8;font-size:0.75rem;">Auto-selects &amp; chains agents sequentially</span>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-        # Multiselect to optionally pin specific agents (leave empty = fully auto)
-        pinned_agents = st.multiselect(
-            "Pin agents (optional — leave empty for auto)",
-            options=MULTI_AGENT_ROSTER,
-            default=[],
-            help="Force specific agents into the pipeline. Leave empty to let the orchestrator decide.",
-        )
-        task_mode = "General QA"  # fallback, not used in multi-agent path
-    else:
-        pinned_agents = []
-        task_mode = st.selectbox("Task", list(TASK_SYSTEM_PROMPTS.keys()), label_visibility="collapsed")
-        TASK_DESCRIPTIONS = {
-            "General QA":         "Ask anything — general knowledge, science, concepts, or open-ended questions.",
-            "Clinical Analyst":   "Interpret ICU vitals, lab trends, sepsis phenotypes, and physiological time-series.",
-            "Code Interpreter":   "Explain, debug, optimize, or rewrite code snippets in any language.",
-            "Summarizer":         "Condense long documents, papers, or reports into concise structured summaries.",
-            "Data Analyst":       "Analyze structured data, generate Python code, and extract statistical insights.",
-            "RAG Assistant":      "Answer questions grounded strictly in your uploaded documents.",
-            "Resume Analyst":     "Review, critique, and improve resumes for clarity, impact, and ATS compatibility.",
-            "Image Generator":    "Generate images from text descriptions using DALL·E 3.",
-        }
-        st.caption(f"💡 {TASK_DESCRIPTIONS[task_mode]}")
+    task_mode = st.selectbox("Task", list(TASK_SYSTEM_PROMPTS.keys()), label_visibility="collapsed")
 
     # ── Temperature ───────────────────────────────────────────────────────────
     temperature = st.slider("Temperature", 0.0, 1.0, 0.3, 0.05,
@@ -1081,7 +943,7 @@ with st.sidebar:
 st.markdown("""
 <div class="tc-header">
     <div class="tc-logo" style="font-family:'Playfair Display',serif;font-size:3.6rem;font-weight:900;">TC·QA·Agent</div>
-    <div class="tc-subtitle" style="font-size:1.5rem;">Time-Course Data Intelligence Platform with Multi-Agentic Orchestration Capabilities</div>
+    <div class="tc-subtitle" style="font-size:1.5rem;">Time-Course Data Intelligence Platform</div>
 </div>
 <p style="font-size:1.1rem; color:var(--text); margin:-10px 0 20px 0; letter-spacing:0.01em;">
     A web-based tool with advanced Q&A systems for interpreting text, data, code, images and documents using LLMs 
@@ -1157,10 +1019,7 @@ with tab_chat:
         st.markdown(f'<span class="badge badge-blue">{n_docs} doc{"s" if n_docs != 1 else ""}</span>',
                     unsafe_allow_html=True)
     with status_cols[3]:
-        if multi_agent_mode:
-            st.caption(f"Model: `{model}` · Mode: **🧠 MultiAgent** · T={temperature}")
-        else:
-            st.caption(f"Model: `{model}` · Mode: **{task_mode}** · T={temperature}")
+        st.caption(f"Model: `{model}` · Mode: **{task_mode}** · T={temperature}")
 
     st.markdown("---")
 
@@ -1228,19 +1087,10 @@ with tab_chat:
                 src_html = ""
                 for s in msg.get("sources", []):
                     src_html += f'<span class="src-chip">📄 {s}</span>'
-                # Show agent pipeline badges for multi-agent responses
-                agents_used = msg.get("agents", [])
-                agent_html = ""
-                if agents_used:
-                    agent_html = "".join(
-                        f'<span class="src-chip" style="background:#0f2a1a;border-color:#2dd4bf;">🤖 {a}</span>'
-                        for a in agents_used
-                    )
                 st.markdown(
                     f'<div class="msg-row">'
                     f'  <div class="avatar avatar-ai">🧬</div>'
                     f'  <div class="msg-ai">'
-                    f'    {agent_html + "<br>" if agent_html else ""}'
                     f'    {src_html + "<br>" if src_html else ""}'
                     f'    <div class="msg-text">',
                     unsafe_allow_html=True,
@@ -1273,15 +1123,7 @@ with tab_chat:
                 st.markdown('<p class="thinking">TC·QA·Agent is thinking…</p>', unsafe_allow_html=True)
 
                 # ── Build system prompt ─────────────────────────────────────
-                # In multi-agent mode use a neutral base; agents get their own prompts
-                if multi_agent_mode:
-                    system_content = (
-                        "You are part of TC·QA·Agent, a multi-agent AI system. "
-                        "Be precise, structured, and task-focused. "
-                        "Do not hallucinate. State uncertainty clearly."
-                    )
-                else:
-                    system_content = TASK_SYSTEM_PROMPTS[task_mode]
+                system_content = TASK_SYSTEM_PROMPTS[task_mode]
 
                 # Prepend any manual context
                 manual_ctx = st.session_state.get("manual_context", "").strip()
@@ -1354,54 +1196,8 @@ with tab_chat:
                         })
                     st.session_state["history"].append(f"Q: {user_query.strip()}\nA: [Image generated]")
 
-                elif multi_agent_mode:
-                    # ── MultiAgent path ───────────────────────────────────
-                    # Step 1: Orchestrate — pick agents
-                    if pinned_agents:
-                        selected_agents = pinned_agents
-                        orchestrator_note = f"📌 Pinned agents: {' → '.join(selected_agents)}"
-                    else:
-                        with st.spinner("🧠 Orchestrator selecting agents…"):
-                            selected_agents = orchestrate(
-                                api_key=api_key, provider=provider, model=model,
-                                query=user_query.strip(), call_llm_fn=call_llm,
-                            )
-                        orchestrator_note = f"🤖 Orchestrator selected: {' → '.join(selected_agents)}"
-
-                    # Step 2: Run pipeline
-                    spinner_msg = f"⚙️ Running {len(selected_agents)} agent(s): {', '.join(selected_agents)}…"
-                    with st.spinner(spinner_msg):
-                        final_answer, agent_outputs = run_multi_agent_pipeline(
-                            api_key=api_key, provider=provider, model=model,
-                            query=user_query.strip(),
-                            agents=selected_agents,
-                            base_system=system_content,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            call_llm_fn=call_llm,
-                        )
-
-                    # Build agent trace header
-                    agent_badges = " → ".join(
-                        f"**[{ao['agent']}]**" for ao in agent_outputs
-                    )
-                    full_response = (
-                        f"> {orchestrator_note}\n\n"
-                        f"**Pipeline:** {agent_badges}\n\n---\n\n"
-                        f"{final_answer}"
-                    )
-                    st.session_state["messages"].append({
-                        "role": "assistant",
-                        "content": full_response,
-                        "sources": rag_sources,
-                        "agents": selected_agents,
-                    })
-                    st.session_state["history"].append(
-                        f"Q: {user_query.strip()}\nA: [MultiAgent: {', '.join(selected_agents)}]"
-                    )
-
-                else:
-                    # ── Single-agent LLM path ─────────────────────────────
+                else:  # ← normal LLM path, only runs if NOT image generation
+                    # ── Build messages list ───────────────────────────────
                     chat_messages = [{"role": "system", "content": system_content}]
 
                     if carry_history:
@@ -1411,6 +1207,7 @@ with tab_chat:
 
                     chat_messages.append({"role": "user", "content": user_query.strip()})
 
+                    # ── Call LLM ──────────────────────────────────────────
                     try:
                         answer = call_llm(
                             provider=provider,
