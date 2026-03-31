@@ -382,17 +382,11 @@ AGENT_FOCUS = {
         "Focus ONLY on: resume review, ATS scoring, skill gap analysis, and rewriting. "
         "Ignore non-resume parts."
     ),
-    "Image Generator": (
-        "Focus ONLY on: generating or describing images. "
-        "Write a detailed, vivid DALL-E prompt based on the user's description. "
-        "Do NOT answer non-image parts of the query."
-    ),
 }
 
 MULTI_AGENT_ROSTER = [
     "General QA", "Clinical Analyst", "Code Interpreter",
     "Summarizer", "Data Analyst", "RAG Assistant", "Resume Analyst",
-    "Image Generator",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -427,9 +421,8 @@ AGENT SPECIALIZATIONS:
 - "Code Interpreter"  → write/debug/explain code, Python scripts
 - "Summarizer"        → condense documents, papers, long reports
 - "Data Analyst"      → statistics, data analysis, chart/plot code
-- "RAG Assistant"     → questions needing answers FROM uploaded or attached or contextual or retrieved documents
+- "RAG Assistant"     → questions needing answers FROM uploaded documents
 - "Resume Analyst"    → resume review, ATS optimization, career advice
-- "Image Generator"   → image generation from text prompts, texual descriptions of uploaded or attached images, or image-based questions
 
 RULES:
 1. Select 1-3 agents MAXIMUM.
@@ -442,8 +435,6 @@ EXAMPLES:
 "Analyze patient lactate trend and write Python to plot it" → ["Clinical Analyst", "Code Interpreter"]
 "Summarize my uploaded paper" → ["RAG Assistant", "Summarizer"]
 "Atlanta tourist spots, sepsis criteria, distance to Durham" → ["General QA", "Clinical Analyst"]
-"Here's my resume, how can I improve it for a data science job?" → ["Resume Analyst"]
-"Tell me best sunset points over the ocean in the United States. Generate an image of a sunset over the ocean" → ["General QA", "Image Generator"]
 
 USER QUERY: {query}
 """
@@ -478,8 +469,6 @@ def run_multi_agent_pipeline(
     api_key: str, provider: str, model: str, query: str,
     agents: list, doc_context: str, manual_context: str,
     temperature: float, max_tokens: int,
-    img_size: str = "1024x1024",      # ← add these
-    img_quality: str = "standard",    # ← add these
 ) -> tuple:
     """Run agents sequentially. Returns (final_answer, agent_outputs, dialogue_log)."""
     agent_outputs = []
@@ -535,14 +524,6 @@ def run_multi_agent_pipeline(
         except Exception as e:
             output = f"[{agent_name} error: {e}]"
 
-        # Special handling: if Image Generator agent, also call DALL-E
-        if agent_name == "Image Generator" and OPENAI_OK:
-            img_url, revised = generate_image(api_key, query, img_size, img_quality)
-            if img_url:
-                output += f"\n\n![Generated Image]({img_url})\n[Download]({img_url})"
-                # Also auto-set model for next run
-                st.session_state["auto_model"] = "dall-e-3"
-
         agent_outputs.append({"agent": agent_name, "output": output})
         prior_summary += f"\n[{agent_name}]: {output[:500]}{'...' if len(output) > 500 else ''}\n"
 
@@ -565,7 +546,6 @@ def run_multi_agent_pipeline(
         "message": "Pipeline complete. Delivering final response.",
         "type": "done",
     })
-    
 
     if len(agent_outputs) == 1:
         final = agent_outputs[0]["output"]
@@ -784,11 +764,9 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # Header
 # ─────────────────────────────────────────────────────────────────────────────
-#<div class="tc-logo">TC·QA·Agent</div>
-# <img src="img1.png" style="width:400px;height:400px;object-fit:contain;">
-st.image("img1.png", width=350, caption="TC·QA·Agent — Time-Course Q&A Assistant with Multi-Agent Orchestration")
 st.markdown("""
 <div class="tc-header">
+    <div class="tc-logo">TC·QA·Agent</div>
     <div class="tc-subtitle">Time-Course Data Intelligence Platform</div>
 </div>
 <p style="font-size:1.1rem;color:var(--text);margin:-10px 0 20px 0;letter-spacing:0.01em;">
@@ -921,98 +899,87 @@ with tab_chat:
             current_turn = len([m for m in st.session_state["messages"] if m["role"] == "user"])
 
             with st.spinner(""):
-                st.markdown('<p class="thinking">TC·QA·Agent is thinking…</p>', unsafe_allow_html=True)
+                st.markdown('<p class="thinking">TC·QA·Agent is thinking...</p>', unsafe_allow_html=True)
 
-                # ── Step 1: Collect manual context ───────────────────────────
-                manual_ctx = st.session_state.get("manual_context", "").strip()
-
-                # ── Step 2: Collect document context (ALL paths share this) ──
+                # Collect contexts
+                manual_ctx  = st.session_state.get("manual_context", "").strip()
                 doc_context = ""
                 rag_sources = []
 
-                # Always inject raw docs if RAG is OFF
                 if not use_rag and st.session_state["documents"]:
                     doc_blocks = []
                     for doc in st.session_state["documents"]:
                         preview = doc["text"][:4000]
-                        if len(doc["text"]) > 4000:
-                            preview += "\n\n[... document truncated ...]"
+                        if len(doc["text"]) > 4000: preview += "\n\n[... truncated ...]"
                         doc_blocks.append(f"[Document: {doc['name']}]\n{preview}")
                     doc_context = "\n\n".join(doc_blocks)
 
-                # Use RAG retrieval if ON
                 if use_rag:
                     if st.session_state["rag_store"]:
                         rag_ctx, rag_sources = retrieve_rag_context(
                             st.session_state["rag_store"], user_query.strip(), k=rag_k)
-                        doc_context = rag_ctx if rag_ctx else "\n\n".join(
+                        doc_context = rag_ctx if rag_ctx else "\n".join(
                             f"[Document: {d['name']}]\n{d['text'][:3000]}"
                             for d in st.session_state["documents"])
                     else:
-                        # No index built — inject raw docs as fallback
-                        doc_context = "\n\n".join(
+                        doc_context = "\n".join(
                             f"[Document: {d['name']}]\n{d['text'][:3000]}"
                             for d in st.session_state["documents"])
                         if st.session_state["documents"]:
-                            st.warning("⚠️ RAG index not built yet — using raw document text.")
+                            st.warning("⚠️ RAG index not built — using raw document text.")
 
-                # ── Step 3: Web search appended to doc_context ───────────────
                 if use_web_search:
-                    with st.spinner("🌐 Searching the web…"):
+                    with st.spinner("🌐 Searching the web..."):
                         search_results = web_search(user_query.strip(), max_results=web_search_k)
                     doc_context += f"\n\n--- WEB SEARCH RESULTS ---\n{search_results}"
                     for url in re.findall(r'https?://[^\s\)\"\']+', user_query)[:2]:
                         doc_context += f"\n\n--- FETCHED PAGE: {url} ---\n{fetch_url(url)}"
 
-                # ── Path 1: Image generation ──────────────────────────────────
+                # Path 1: Image generation
                 if model == "dall-e-3" or task_mode == "Image Generator":
-                    with st.spinner("🎨 Generating image…"):
+                    with st.spinner("🎨 Generating image..."):
                         img_url, revised_prompt = generate_image(
                             api_key, user_query.strip(), img_size, img_quality)
                     if img_url:
                         st.session_state["messages"].append({
                             "role": "assistant",
                             "content": (f"**Revised prompt used:**\n_{revised_prompt}_\n\n"
-                                        f"![Generated Image]({img_url})\n\n[⬇ Download image]({img_url})"),
+                                        f"![Generated Image]({img_url})\n\n[Download image]({img_url})"),
                             "sources": [], "image_url": img_url,
                         })
                     else:
                         st.session_state["messages"].append({
                             "role": "assistant",
-                            "content": f"❌ Image generation failed: {revised_prompt}",
+                            "content": f"Image generation failed: {revised_prompt}",
                             "sources": [],
                         })
                     st.session_state["history"].append(f"Q: {user_query.strip()}\nA: [Image generated]")
 
-                # ── Path 2: MultiAgent pipeline ───────────────────────────────
+                # Path 2: MultiAgent
                 elif multi_agent_mode:
                     if pinned_agents:
                         selected_agents   = pinned_agents
-                        orchestrator_note = f"📌 Pinned agents: {' → '.join(selected_agents)}"
+                        orchestrator_note = f"📌 Pinned agents: {' -> '.join(selected_agents)}"
                     else:
-                        with st.spinner("🧠 Orchestrator routing query to specialist agents…"):
+                        with st.spinner("🧠 Orchestrator routing query to specialist agents..."):
                             selected_agents = orchestrate(
                                 api_key=api_key, provider=provider,
                                 model=model, query=user_query.strip())
-                        orchestrator_note = f"🤖 Orchestrator selected: {' → '.join(selected_agents)}"
+                        orchestrator_note = f"🤖 Orchestrator selected: {' -> '.join(selected_agents)}"
 
-                    with st.spinner(f"⚙️ Running {len(selected_agents)} agent(s): {', '.join(selected_agents)}…"):
+                    with st.spinner(f"⚙️ Running {len(selected_agents)} agent(s): {', '.join(selected_agents)}..."):
                         final_answer, agent_outputs, dialogue_log = run_multi_agent_pipeline(
                             api_key=api_key, provider=provider, model=model,
-                            query=user_query.strip(),
-                            agents=selected_agents,
-                            doc_context=doc_context,      # ✅ documents passed here
-                            manual_context=manual_ctx,    # ✅ manual context passed here
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            img_size=img_size,
-                            img_quality=img_quality,
+                            query=user_query.strip(), agents=selected_agents,
+                            doc_context=doc_context, manual_context=manual_ctx,
+                            temperature=temperature, max_tokens=max_tokens,
                         )
 
                     st.session_state["agent_dialogues"].append({
                         "turn": current_turn, "log": dialogue_log,
                     })
-                    agent_badges = " → ".join(f"**[{ao['agent']}]**" for ao in agent_outputs)
+
+                    agent_badges = " -> ".join(f"**[{ao['agent']}]**" for ao in agent_outputs)
                     full_response = (
                         f"> {orchestrator_note}\n\n"
                         f"**Pipeline:** {agent_badges}\n\n---\n\n"
@@ -1025,16 +992,13 @@ with tab_chat:
                     st.session_state["history"].append(
                         f"Q: {user_query.strip()}\nA: [MultiAgent: {', '.join(selected_agents)}]")
 
-                # ── Path 3: Single-agent ──────────────────────────────────────
+                # Path 3: Single-agent
                 else:
                     system_content = TASK_SYSTEM_PROMPTS[task_mode]
                     if manual_ctx:
                         system_content += f"\n\n--- ADDITIONAL CONTEXT ---\n{manual_ctx}"
-                    if doc_context:                          # ✅ always injected
-                        system_content += (
-                            f"\n\n--- UPLOADED DOCUMENTS & CONTEXT "
-                            f"(use these to answer the user's question) ---\n{doc_context}"
-                        )
+                    if doc_context:
+                        system_content += f"\n\n--- UPLOADED DOCUMENTS ---\n{doc_context}"
 
                     chat_messages = [{"role": "system", "content": system_content}]
                     if carry_history:
@@ -1043,9 +1007,9 @@ with tab_chat:
                     chat_messages.append({"role": "user", "content": user_query.strip()})
 
                     try:
-                        answer = call_llm(
-                            provider=provider, api_key=api_key, model=model,
-                            messages=chat_messages, temperature=temperature, max_tokens=max_tokens)
+                        answer = call_llm(provider=provider, api_key=api_key, model=model,
+                                          messages=chat_messages, temperature=temperature,
+                                          max_tokens=max_tokens)
                         st.session_state["messages"].append({
                             "role": "assistant", "content": answer, "sources": rag_sources,
                         })
@@ -1057,139 +1021,6 @@ with tab_chat:
                         })
 
             st.rerun()
-    
-    # if submitted and user_query.strip():
-    #     if not api_key:
-    #         st.error("⚠️ Please enter your API key in the sidebar.")
-    #     else:
-    #         st.session_state["messages"].append({"role": "user", "content": user_query.strip()})
-    #         current_turn = len([m for m in st.session_state["messages"] if m["role"] == "user"])
-
-    #         with st.spinner(""):
-    #             st.markdown('<p class="thinking">TC·QA·Agent is thinking...</p>', unsafe_allow_html=True)
-
-    #             # Collect contexts
-    #             manual_ctx  = st.session_state.get("manual_context", "").strip()
-    #             doc_context = ""
-    #             rag_sources = []
-
-    #             if not use_rag and st.session_state["documents"]:
-    #                 doc_blocks = []
-    #                 for doc in st.session_state["documents"]:
-    #                     preview = doc["text"][:4000]
-    #                     if len(doc["text"]) > 4000: preview += "\n\n[... truncated ...]"
-    #                     doc_blocks.append(f"[Document: {doc['name']}]\n{preview}")
-    #                 doc_context = "\n\n".join(doc_blocks)
-
-    #             if use_rag:
-    #                 if st.session_state["rag_store"]:
-    #                     rag_ctx, rag_sources = retrieve_rag_context(
-    #                         st.session_state["rag_store"], user_query.strip(), k=rag_k)
-    #                     doc_context = rag_ctx if rag_ctx else "\n".join(
-    #                         f"[Document: {d['name']}]\n{d['text'][:3000]}"
-    #                         for d in st.session_state["documents"])
-    #                 else:
-    #                     doc_context = "\n".join(
-    #                         f"[Document: {d['name']}]\n{d['text'][:3000]}"
-    #                         for d in st.session_state["documents"])
-    #                     if st.session_state["documents"]:
-    #                         st.warning("⚠️ RAG index not built — using raw document text.")
-
-    #             if use_web_search:
-    #                 with st.spinner("🌐 Searching the web..."):
-    #                     search_results = web_search(user_query.strip(), max_results=web_search_k)
-    #                 doc_context += f"\n\n--- WEB SEARCH RESULTS ---\n{search_results}"
-    #                 for url in re.findall(r'https?://[^\s\)\"\']+', user_query)[:2]:
-    #                     doc_context += f"\n\n--- FETCHED PAGE: {url} ---\n{fetch_url(url)}"
-
-    #             # Path 1: Image generation
-    #             if model == "dall-e-3" or task_mode == "Image Generator":
-    #                 with st.spinner("🎨 Generating image..."):
-    #                     img_url, revised_prompt = generate_image(
-    #                         api_key, user_query.strip(), img_size, img_quality)
-    #                 if img_url:
-    #                     st.session_state["messages"].append({
-    #                         "role": "assistant",
-    #                         "content": (f"**Revised prompt used:**\n_{revised_prompt}_\n\n"
-    #                                     f"![Generated Image]({img_url})\n\n[Download image]({img_url})"),
-    #                         "sources": [], "image_url": img_url,
-    #                     })
-    #                 else:
-    #                     st.session_state["messages"].append({
-    #                         "role": "assistant",
-    #                         "content": f"Image generation failed: {revised_prompt}",
-    #                         "sources": [],
-    #                     })
-    #                 st.session_state["history"].append(f"Q: {user_query.strip()}\nA: [Image generated]")
-
-    #             # Path 2: MultiAgent
-    #             elif multi_agent_mode:
-    #                 if pinned_agents:
-    #                     selected_agents   = pinned_agents
-    #                     orchestrator_note = f"📌 Pinned agents: {' -> '.join(selected_agents)}"
-    #                 else:
-    #                     with st.spinner("🧠 Orchestrator routing query to specialist agents..."):
-    #                         selected_agents = orchestrate(
-    #                             api_key=api_key, provider=provider,
-    #                             model=model, query=user_query.strip())
-    #                     orchestrator_note = f"🤖 Orchestrator selected: {' -> '.join(selected_agents)}"
-
-    #                 with st.spinner(f"⚙️ Running {len(selected_agents)} agent(s): {', '.join(selected_agents)}..."):
-    #                     final_answer, agent_outputs, dialogue_log = run_multi_agent_pipeline(
-    #                         api_key=api_key, provider=provider, model=model,
-    #                         query=user_query.strip(), agents=selected_agents,
-    #                         doc_context=doc_context, manual_context=manual_ctx,
-    #                         temperature=temperature, max_tokens=max_tokens,
-    #                         img_size=img_size,        # ← add
-    #                         img_quality=img_quality,  # ← add
-    #                     )
-
-    #                 st.session_state["agent_dialogues"].append({
-    #                     "turn": current_turn, "log": dialogue_log,
-    #                 })
-
-    #                 agent_badges = " -> ".join(f"**[{ao['agent']}]**" for ao in agent_outputs)
-    #                 full_response = (
-    #                     f"> {orchestrator_note}\n\n"
-    #                     f"**Pipeline:** {agent_badges}\n\n---\n\n"
-    #                     f"{final_answer}"
-    #                 )
-    #                 st.session_state["messages"].append({
-    #                     "role": "assistant", "content": full_response,
-    #                     "sources": rag_sources, "agents": selected_agents,
-    #                 })
-    #                 st.session_state["history"].append(
-    #                     f"Q: {user_query.strip()}\nA: [MultiAgent: {', '.join(selected_agents)}]")
-
-    #             # Path 3: Single-agent
-    #             else:
-    #                 system_content = TASK_SYSTEM_PROMPTS[task_mode]
-    #                 if manual_ctx:
-    #                     system_content += f"\n\n--- ADDITIONAL CONTEXT ---\n{manual_ctx}"
-    #                 if doc_context:
-    #                     system_content += f"\n\n--- UPLOADED DOCUMENTS ---\n{doc_context}"
-
-    #                 chat_messages = [{"role": "system", "content": system_content}]
-    #                 if carry_history:
-    #                     for h in st.session_state["messages"][-(max_history * 2 + 1):-1]:
-    #                         chat_messages.append({"role": h["role"], "content": h["content"]})
-    #                 chat_messages.append({"role": "user", "content": user_query.strip()})
-
-    #                 try:
-    #                     answer = call_llm(provider=provider, api_key=api_key, model=model,
-    #                                       messages=chat_messages, temperature=temperature,
-    #                                       max_tokens=max_tokens)
-    #                     st.session_state["messages"].append({
-    #                         "role": "assistant", "content": answer, "sources": rag_sources,
-    #                     })
-    #                     st.session_state["history"].append(f"Q: {user_query.strip()}\nA: {answer}")
-    #                 except Exception as e:
-    #                     err = f"**Error calling {provider}:** {e}\n\n```\n{traceback.format_exc()}\n```"
-    #                     st.session_state["messages"].append({
-    #                         "role": "assistant", "content": err, "sources": []
-    #                     })
-
-    #         st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — DOCUMENTS
