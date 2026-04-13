@@ -1,4 +1,4 @@
-# LLM-Based QA Model for Time-Course Data Interpretation
+# TC-QA-Agent: LLM-Based QA Model for Time-Course Data Interpretation
 
 This repository provides a Question Answering (QA) model designed to interpret and analyze time-course (TC) data, with a focus on clinical and physiological datasets. The model leverages large language models (LLMs) to answer user queries about time-series data, such as patient vital signs, laboratory results, and other clinical measurements.
 
